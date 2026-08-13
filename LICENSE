@@ -1,0 +1,43 @@
+MIT License
+
+Copyright (c) 2026 ReDetail contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+THE MIT GRANT ABOVE COVERS THIS PROJECT'S ORIGINAL CODE ONLY (redetail.py and
+build_ui_workflow.py). IT DOES NOT COVER THE MODEL WEIGHTS, AND IT DOES NOT
+COVER THE DERIVED WORKFLOW FILES IN workflows/ (see below). THE WEIGHTS ARE NOT
+MIT:
+
+  * LTX-2.5 (Lightricks) .............. LTX-2-community-license
+  * LTX-2.5 IC-LoRA Pixel Spatial
+    Upscaler (Lightricks) ............ see the model repository's own terms
+
+Both Hugging Face repositories are gated and require accepting their licence.
+Read both before any commercial use.
+
+The ComfyUI workflow in workflows/ is DERIVED from Lightricks' shipped example
+`example_workflows/2.5/LTX-2.5_V2V_ICLoRA_Single_Stage_Distilled.json` in
+github.com/Lightricks/ComfyUI-LTXVideo. That repository's own licence governs
+the derived workflow files; the MIT grant above applies to this project's
+original code (redetail.py, build_ui_workflow.py) and NOT to the derived
+workflow. If ComfyUI-LTXVideo's terms conflict with the above for those files,
+theirs prevail. Verify them before redistributing workflows/.

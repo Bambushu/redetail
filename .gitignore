@@ -1,0 +1,11 @@
+# Generated demo assets. The renders are gigabytes and the post set is ~180MB of
+# derived images and video — all reproducible with demos/make_assets.py, and the
+# published versions live on CivitAI rather than in git history.
+demos/renders/
+demos/post/
+
+# Scratch
+*_chunks/
+__pycache__/
+*.pyc
+.DS_Store
