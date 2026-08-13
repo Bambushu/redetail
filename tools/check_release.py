@@ -103,6 +103,37 @@ ok("int8 use derived from selections, not installed files",
 ok("unselected GGUF does not pass --setup", "but you did not " in src)
 ok("ffconcat paths escaped", "replace(\"'\", \"'\\\\''\")" in src)
 
+print("\n=== 3b. Muxing the original audio never trims the picture ===")
+# BEHAVIOURAL, not a string match. A source's audio track is routinely a few ms shorter than its
+# picture, and `-shortest` alone then stops at the AUDIO end and silently drops the last frames —
+# after every length gate in the tool has already passed. This builds exactly that clip and mixes
+# it with the shipped flags, so the bug cannot come back unnoticed.
+import tempfile
+ok("mux command pads audio rather than truncating video", '"-af", "apad"' in src)
+ok("frame count re-checked AFTER the mux", "Muxing changed the frame count" in src)
+try:
+    with tempfile.TemporaryDirectory() as td:
+        vid, srcclip, outp = f"{td}/v.mp4", f"{td}/s.mp4", f"{td}/o.mp4"
+        # 17 frames @24fps = 0.7083s of picture
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                        "-i", "testsrc=size=64x64:rate=24", "-frames:v", "17",
+                        "-pix_fmt", "yuv420p", vid], check=True)
+        # same picture, but only 0.69s of audio — SHORTER than the video, as real clips are
+        subprocess.run(["ffmpeg", "-y", "-v", "error",
+                        "-f", "lavfi", "-i", "testsrc=size=64x64:rate=24",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=0.69",
+                        "-map", "0:v", "-map", "1:a", "-frames:v", "17",
+                        "-c:a", "aac", "-pix_fmt", "yuv420p", srcclip], check=True)
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", vid, "-i", srcclip,
+                        "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac",
+                        "-af", "apad", "-shortest", outp], check=True)
+        got = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                              "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", outp],
+                             capture_output=True, text=True).stdout.strip()
+        ok("17-frame video + 0.69s audio survives the mux", got == "17", f"got {got} frames")
+except FileNotFoundError:
+    warn("ffmpeg not on PATH — mux behaviour not exercised")
+
 print("\n=== 4. Every README dimension is on the /64 grid ===")
 # 2880x1632 (off-grid TARGET) and 432x768 (off-grid SOURCE) are the two counter-examples the
 # prose exists to explain. Anything else off-grid is a typo that would fail a real render.

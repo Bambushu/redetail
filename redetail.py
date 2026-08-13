@@ -706,12 +706,28 @@ def main():
                  f"the frame RATE does not, and -shortest would then silently trim the picture.")
 
     if a.audio == "original":
+        # `-af apad` BEFORE `-shortest`, and the two must go together.
+        #
+        # A source's audio track is routinely a few milliseconds shorter than its video: here a
+        # 107-frame clip carried 4.448s of audio against 4.458s of picture. `-shortest` alone then
+        # stops at the AUDIO end and silently trims the picture — 107 frames in, 105 out, after
+        # every length gate in this script had already passed. apad makes the audio effectively
+        # infinite, so `-shortest` now stops at the VIDEO end and pads the tail with silence.
+        # Losing 8ms of silence is nothing; losing two frames of picture is a desync.
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", joined, "-i", src, "-map", "0:v",
-                        "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest",
+                        "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
+                        *(["-af", "apad"] if has_audio else []), "-shortest",
                         "-movflags", "+faststart", out], check=True)
     else:
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", joined, "-c", "copy",
                         "-movflags", "+faststart", out], check=True)
+
+    # Re-check AFTER the mux. Every other gate in this script runs before it, which is exactly how
+    # a two-frame loss shipped: the assembly was verified correct and then the mux quietly undid it.
+    final_frames = nframes(out)
+    if src_frames and final_frames != src_frames:
+        sys.exit(f"Muxing changed the frame count: {final_frames} vs {src_frames}. The file at "
+                 f"{out} is out of sync with its audio — do not use it.")
 
     if not a.keep_chunks:
         for p in created:
