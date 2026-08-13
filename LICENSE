@@ -22,22 +22,56 @@ SOFTWARE.
 
 ---
 
-THE MIT GRANT ABOVE COVERS THIS PROJECT'S ORIGINAL CODE ONLY (redetail.py and
-build_ui_workflow.py). IT DOES NOT COVER THE MODEL WEIGHTS, AND IT DOES NOT
-COVER THE DERIVED WORKFLOW FILES IN workflows/ (see below). THE WEIGHTS ARE NOT
-MIT:
+THE MIT GRANT ABOVE COVERS THIS PROJECT'S ORIGINAL CODE ONLY:
 
-  * LTX-2.5 (Lightricks) .............. LTX-2-community-license
+    redetail.py   build_ui_workflow.py   tools/   demos/
+
+IT DOES NOT COVER THE MODEL WEIGHTS, AND IT DOES NOT COVER THE WORKFLOW FILES
+IN workflows/. Those are governed by the LTX-2 Community License Agreement, a
+complete copy of which is included at:
+
+    workflows/LICENSE-LTX-2-Community.txt
+
+as required by section 3(b) of that Agreement.
+
+
+THE WORKFLOW FILES ARE MODIFIED DERIVATIVES
+-------------------------------------------
+workflows/ReDetail_LTX25_upscale.json and workflows/ltx25_upscale_API.json are
+DERIVED, WITH MODIFICATIONS, from Lightricks' shipped example
+
+    example_workflows/2.5/LTX-2.5_V2V_ICLoRA_Single_Stage_Distilled.json
+    github.com/Lightricks/ComfyUI-LTXVideo
+
+Changes made (section 3(c) requires this notice): model filenames repointed to
+the int8_convrot quantisation, the IC-LoRA swapped from instant-shave to the
+pixel spatial upscaler, two canvas links severed so the output dimensions are
+settable, the reference-resize default changed, a placeholder image set, and
+six documentation panels rewritten. build_ui_workflow.py performs and documents
+every one of these edits.
+
+Lightricks' unmodified example is NOT redistributed here. Fetch it from the
+repository above; build_ui_workflow.py prints the exact path if it is absent.
+
+These files are distributed EXCLUSIVELY under the LTX-2 Community License
+Agreement, per section 3(b). The MIT grant above does not apply to them.
+
+
+THE WEIGHTS
+-----------
+  * LTX-2.5 (Lightricks) ............... LTX-2 Community License Agreement
   * LTX-2.5 IC-LoRA Pixel Spatial
-    Upscaler (Lightricks) ............ see the model repository's own terms
+    Upscaler (Lightricks) .............. see that model repository's own terms
 
 Both Hugging Face repositories are gated and require accepting their licence.
-Read both before any commercial use.
 
-The ComfyUI workflow in workflows/ is DERIVED from Lightricks' shipped example
-`example_workflows/2.5/LTX-2.5_V2V_ICLoRA_Single_Stage_Distilled.json` in
-github.com/Lightricks/ComfyUI-LTXVideo. That repository's own licence governs
-the derived workflow files; the MIT grant above applies to this project's
-original code (redetail.py, build_ui_workflow.py) and NOT to the derived
-workflow. If ComfyUI-LTXVideo's terms conflict with the above for those files,
-theirs prevail. Verify them before redistributing workflows/.
+
+USE RESTRICTIONS CARRY FORWARD (section 3(a))
+---------------------------------------------
+Section 4 and Attachment A of the LTX-2 Community License Agreement impose
+use-based restrictions. They apply to you, and to anyone you pass these files
+on to. Read them in workflows/LICENSE-LTX-2-Community.txt.
+
+COMMERCIAL USE: entities with annual revenue over $10,000,000 must obtain a
+separate paid commercial licence from Lightricks (https://ltx.io/model/licensing)
+before using LTX-2 or derivatives of it.

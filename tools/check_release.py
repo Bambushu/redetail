@@ -149,11 +149,25 @@ nbad = sorted({f"{a}x{b}" for a, b in re.findall(r"(\d{3,4})[x×](\d{3,4})", not
                if int(a) % 64 or int(b) % 64})
 ok("note dims /64", nbad == ["2880x1632"], f"found {nbad}")
 
-print("\n=== 8. Licence coherence ===")
+print("\n=== 8. Licence compliance ===")
+# The LTX-2 Community License is NOT permissive. Section 3 permits redistributing derivatives
+# only on conditions, and each check below maps to one of them.
 lic = open(f"{REPO}/LICENSE").read()
+ltx = os.path.join(REPO, "workflows", "LICENSE-LTX-2-Community.txt")
 ok("MIT covers original code ONLY", "ORIGINAL CODE ONLY" in lic)
-ok("derived workflow excluded from the grant", "DERIVED WORKFLOW FILES" in lic)
-ok("no self-contradiction", "CODE AND WORKFLOW" not in lic)
+ok("3(b) complete copy of the Agreement is included", os.path.exists(ltx),
+   f"{os.path.getsize(ltx)/1024:.0f}KB" if os.path.exists(ltx) else "MISSING")
+if os.path.exists(ltx):
+    lt = open(ltx).read()
+    ok("3(b) that copy includes Attachment A", "Attachment A" in lt and "ATTACHMENT A" in lt.upper())
+ok("3(b) derivatives stated as exclusively under that Agreement", "EXCLUSIVELY under" in lic)
+ok("3(c) modified files carry a notice of what changed", "Changes made" in lic)
+ok("3(a) use restrictions passed on to recipients", "USE RESTRICTIONS CARRY FORWARD" in lic)
+ok("commercial-revenue threshold stated", "10,000,000" in lic and "10,000,000" in md)
+ok("no verbatim upstream example redistributed",
+   not os.path.exists(os.path.join(REPO, "workflows", "_base_ui.json")))
+ok("no self-contradiction", "CODE AND WORKFLOW" not in lic
+   and "do not reproduce any upstream" not in md.lower())
 ok("README licence section agrees", "own code only" in md)
 
 print("\n=== 9. Nothing machine-specific in any shipped file ===")

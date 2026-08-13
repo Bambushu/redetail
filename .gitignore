@@ -9,3 +9,7 @@ demos/post/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Lightricks' unmodified example workflow. NOT redistributed here: build_ui_workflow.py
+# derives from it and prints exactly where to fetch it. See LICENSE.
+workflows/_base_ui.json

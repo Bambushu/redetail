@@ -345,15 +345,20 @@ if its nodes have changed since, that's the first thing to suspect.
 
 ## Licence
 
-**The MIT grant in `LICENSE` covers this project's own code only** — `redetail.py` and
-`build_ui_workflow.py`. It covers neither the weights nor the workflow files.
+**The MIT grant in `LICENSE` covers this project's own code only** — `redetail.py`,
+`build_ui_workflow.py`, `tools/` and `demos/`. It covers neither the weights nor the workflows.
 
-**The model weights are not MIT.** LTX-2.5 is released under the LTX-2-community-license and the
-IC-LoRA under its own terms. Both Hugging Face repos are gated; read what you accept there before
-any commercial use.
+**The workflow files are modified derivatives** of Lightricks'
+`example_workflows/2.5/LTX-2.5_V2V_ICLoRA_Single_Stage_Distilled.json`, and are distributed
+**exclusively under the LTX-2 Community License Agreement** — a complete copy is included at
+[`workflows/LICENSE-LTX-2-Community.txt`](workflows/LICENSE-LTX-2-Community.txt), as that licence
+requires. `LICENSE` lists exactly what was changed. Lightricks' unmodified example is not
+redistributed here; `build_ui_workflow.py` tells you where to get it.
 
-**The workflows are derived work.** Everything in `workflows/` comes from Lightricks' shipped
-`example_workflows/2.5/LTX-2.5_V2V_ICLoRA_Single_Stage_Distilled.json`, so
-[ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo)'s licence governs it, not ours.
-Check its terms before you redistribute those files. We don't reproduce any upstream licence text
-here — go read the originals.
+**The weights are not MIT either.** LTX-2.5 is under the same Community License, the IC-LoRA under
+its own terms. Both Hugging Face repos are gated.
+
+**Two things that catch people out.** That licence carries **use restrictions** (section 4 and
+Attachment A) which apply to you and to anyone you pass these files to. And any entity with annual
+revenue over **$10,000,000** needs a separate paid commercial licence from
+[Lightricks](https://ltx.io/model/licensing) before using LTX-2 or derivatives of it.
