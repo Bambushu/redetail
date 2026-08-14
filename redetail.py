@@ -426,8 +426,8 @@ def bootstrap_cond(url, encoder, name, clip_device=None):
 def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
     """`--setup` must check the install the user is actually going to RUN.
 
-    It used to take only the URL, so it always demanded the int8_convrot text encoder — which is
-    Blackwell-only. A correctly configured 4090 (GGUF transformer + bf16 encoder on CPU) was told
+    It used to take only the URL, so it always demanded the int8_convrot text encoder. A
+    correctly configured 4090 (GGUF transformer + bf16 encoder on CPU) was told
     it had a missing model, and a GGUF install carrying an unusable int8 encoder was told it was
     fine. Both wrong, in opposite directions. The variant flags come in here now.
     """
@@ -599,17 +599,19 @@ def main():
                         "per chunk, which you do not want on finished material.")
     p.add_argument("--keep-chunks", action="store_true")
     # ---- low-spec / non-Blackwell -----------------------------------------------------------
-    # int8_convrot needs Blackwell tensor layouts. That is what rules out a 4090 — not its VRAM.
+    # NOT a Blackwell requirement — that claim was retracted, see doctor(). int8_convrot runs on
+    # Ampere and Ada; a GGUF transformer is simply smaller and faster, and is the fallback if the
+    # int8 weights will not load (check comfy-kitchen >=0.2.26 before blaming the card).
     # A GGUF transformer dequantizes in the compute kernel and runs on any architecture. Measured
     # on an RTX 4090: 8 sampling steps in 70s, 21.8GB peak of 24.5GB.
     p.add_argument("--gguf", default=None,
                    help="GGUF transformer in models/unet (e.g. LTX-2.5-Distilled-Q4_K_M.gguf). "
-                        "Required on non-Blackwell cards; also 6.4GB lighter and ~16%% faster.")
+                        "6.4GB lighter and ~16%% faster. NOT required on non-Blackwell cards: "
+                        "int8_convrot runs on Ampere and Ada too.")
     p.add_argument("--encoder", default=None,
-                   help="text encoder filename. The int8_convrot encoder is ALSO Blackwell-only, "
-                        "so on other cards use gemma4-12b-with-proj-ltx-2.5-bf16.safetensors "
-                        "together with --clip-device cpu (it is 26GB and will not fit beside the "
-                        "transformer).")
+                   help="text encoder filename. Prefer --cached-cond, which loads NO encoder at "
+                        "all. If you do need one and the int8 will not load, the bf16 is 26GB and "
+                        "wants --clip-device cpu (it will not fit beside the transformer).")
     p.add_argument("--clip-device", default=None, choices=["cpu", "default"],
                    help="run the text encoder on CPU. It encodes once then idles through every "
                         "sampling step, so this buys VRAM for a one-off CPU cost.")
