@@ -137,10 +137,13 @@ except FileNotFoundError:
 print("\n=== 4. Every README dimension is on the /64 grid ===")
 # 2880x1632 (off-grid TARGET) and 432x768 (off-grid SOURCE) are the two counter-examples the
 # prose exists to explain. Anything else off-grid is a typo that would fail a real render.
-DELIBERATE = sorted(["2880x1632", "432x768"])
-bad = sorted({f"{a}x{b}" for a, b in re.findall(r"(\d{3,4})[x×](\d{3,4})", md)
-              if int(a) % 64 or int(b) % 64})
-ok("README dims /64 (counter-examples allowed)", bad == DELIBERATE, f"found {bad}")
+DELIBERATE = {"2880x1632", "432x768"}
+bad = {f"{a}x{b}" for a, b in re.findall(r"(\d{3,4})[x×](\d{3,4})", md)
+       if int(a) % 64 or int(b) % 64}
+# SUBSET, not equality. These two are *permitted*, not *required* — asserting equality meant that
+# editing a counter-example out of the prose failed the check, which is backwards.
+ok("README dims /64 (counter-examples allowed)", bad <= DELIBERATE,
+   f"unexplained off-grid: {sorted(bad - DELIBERATE)}")
 
 print("\n=== 5. README size table re-derived from the code ===")
 rows = re.findall(r"\|\s*(\d+)x(\d+)\s*\|\s*\**(\d+)x(\d+)\**[^|]*\|\s*(\d+)x(\d+)\s*\|", md)
