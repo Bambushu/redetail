@@ -553,16 +553,26 @@ def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
                   "              VAEDecodeTiled raises 'Cannot convert a MPS Tensor to float64'.\n"
                   "              Compute it on CPU and move the fp32 result to the device.\n"
                   "              The function already returns float32, so nothing else changes.")
+    # RETRACTED. This used to FAIL any non-Blackwell card carrying int8 weights, on the claim that
+    # int8_convrot "will NOT load at any resolution". That is wrong, and it was blocking setups
+    # that work: users report int8_convrot running on a 3090, a 4090 and a 1070, and NVIDIA has had
+    # INT8 tensor cores since Pascal.
+    #
+    # What we actually saw was a rented 4090 failing to load it. The likeliest cause is the one
+    # already documented three sections up: comfy-kitchen 0.2.10 (what several ComfyUI images ship)
+    # fails to load EVERY convrot checkpoint, with an error that reads like the weights are
+    # unsupported rather than the library being stale. A version fault misread as an architecture
+    # fault. Report it as information now, and point at the pin that most likely explains it.
     if not is_blackwell and using_int8 and (int8_installed or encoder is None):
-        say(False, f"int8_convrot weights present but '{gpu}' is not Blackwell",
-            "int8_convrot needs Blackwell tensor layouts - these weights will NOT load on this "
-            "card at any resolution. Use the GGUF path: install github.com/city96/ComfyUI-GGUF, "
-            "put LTX-2.5-Distilled-Q4_K_M.gguf in models/unet/, and run with "
-            "--gguf LTX-2.5-Distilled-Q4_K_M.gguf "
-            "--encoder gemma4-12b-with-proj-ltx-2.5-bf16.safetensors --clip-device cpu "
-            "--budget 150 --decode-tile 256")
+        say(True, f"'{gpu}' is not Blackwell — int8_convrot is still expected to work",
+            "")
+        print("        NOTE  If int8_convrot fails to load, check comfy-kitchen FIRST: 0.2.10\n"
+              "              fails on every convrot checkpoint and the error looks like an\n"
+              "              unsupported-weights error. Confirm >=0.2.26 in the SAME python\n"
+              "              ComfyUI runs from. Only if that is current is the GGUF path the\n"
+              "              answer:  --gguf LTX-2.5-Distilled-Q4_K_M.gguf --cached-cond")
     elif not is_blackwell and gguf_node:
-        say(True, f"'{gpu}' is not Blackwell, and ComfyUI-GGUF is installed - use --gguf")
+        say(True, f"'{gpu}' is not Blackwell, and ComfyUI-GGUF is installed if you need it")
 
     print("-" * 60)
     print("All checks passed. Try the smoke test:\n"

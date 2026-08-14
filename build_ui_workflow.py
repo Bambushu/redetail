@@ -89,16 +89,20 @@ for identity-critical faces, where it will change them.
 
 ## ⛔ START HERE — nothing works until this is done
 
-**1. Check your GPU.** `int8_convrot` needs **Blackwell** (RTX 50-series, RTX PRO 6000, B200).
-On anything older use a GGUF build instead: install `city96/ComfyUI-GGUF`, download
-`LTX-2.5-Distilled-Q4_K_M.gguf` (15GB) from 🤗 `Abiray/LTX-2.5-Distilled-GGUF` into
-`models/unet/`, and replace the UNETLoader with **UnetLoaderGGUF**.
+**1. ✅ CORRECTION — `int8_convrot` is NOT Blackwell-only.** An earlier version of this panel said
+it was. That was wrong: it runs on Ampere and Ada too (reported working on 3090, 4090 and 1070).
+**Use the int8 weights below on any modern NVIDIA card.**
 
-⚠️ **That alone is not enough.** The int8 *text encoder* is Blackwell-only as well, so also
-download `gemma4-12b-with-proj-ltx-2.5-bf16.safetensors` (26GB) into `models/text_encoders/`,
-point **both** CLIPLoaders at it, and set their device to `cpu` (it will not fit beside the
-transformer). Simpler: use the CLI, which sets all three for you —
-`python3 redetail.py clip.mp4 --gguf LTX-2.5-Distilled-Q4_K_M.gguf --encoder gemma4-12b-with-proj-ltx-2.5-bf16.safetensors --clip-device cpu --budget 150 --decode-tile 256`
+⚠️ **If int8 fails to load, suspect `comfy-kitchen` BEFORE your GPU.** Version 0.2.10, which
+several ComfyUI images ship, fails on every convrot checkpoint and reports
+`'NoneType' object has no attribute 'Params'` — which reads like unsupported weights. Step 2 pins
+the fix.
+
+Only if int8 genuinely will not run: install `city96/ComfyUI-GGUF`, put
+`LTX-2.5-Distilled-Q4_K_M.gguf` (15GB, 🤗 `Abiray/LTX-2.5-Distilled-GGUF`) in `models/unet/`, and
+swap UNETLoader for **UnetLoaderGGUF**. Then skip the text encoder entirely with the shipped cached
+conditioning rather than downloading the 26GB bf16 one —
+`python3 redetail.py clip.mp4 --gguf LTX-2.5-Distilled-Q4_K_M.gguf --cached-cond`
 
 **2. Install the two pinned dependencies — into the SAME python ComfyUI runs from.**
 

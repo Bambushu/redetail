@@ -73,12 +73,23 @@ base repo, or the weights 403 while the README loads fine.
 | `ltx-2.5-audio-vae-bf16.safetensors` | `models/vae/` | 0.4 GB |
 | `ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors` | `models/loras/` | 0.3 GB |
 
-**Your GPU decides which weights you need.** `int8_convrot` requires **Blackwell** (RTX 50-series,
-RTX PRO 6000, B200). That's an architecture limit, not a memory one. On a 4090 they won't load at
-any resolution however much VRAM is free.
+### Correction: int8_convrot is not Blackwell-only
 
-On anything older, run the GGUF path. All three parts are required; swapping only the transformer
-still fails, because the int8 *text encoder* is Blackwell-only too:
+**This README previously said `int8_convrot` requires Blackwell and will not load on anything
+older. That was wrong, and the correction is worth reading before you download anything.** Users
+have since reported it running on a 3090, a 4090 and a 1070, and NVIDIA has shipped INT8 tensor
+cores since Pascal.
+
+What we actually hit was one rented 4090 that would not load it, and we concluded architecture. The
+likelier cause is `comfy-kitchen`: **0.2.10 fails on every convrot checkpoint**, and its error reads
+like the weights are unsupported rather than the library being stale. Several ComfyUI images ship
+exactly that version.
+
+**So: try int8 first.** If it fails to load, check `comfy-kitchen>=0.2.26` in the same python
+ComfyUI runs from before concluding anything about your card. Sorry, this cost people downloads.
+
+The GGUF path below is still the right answer if int8 genuinely does not work for you, and it is
+lighter regardless:
 
 ```bash
 python3 redetail.py clip.mp4 --scale 1.5 \
@@ -177,8 +188,8 @@ input                 video to upscale (omit with --setup)
 --budget    850       frame-megapixels per chunk, the VRAM dial. Lower it if you OOM
 --audio     original  'original' re-muxes your track; 'generated' keeps the model's
 --keep-chunks         keep the per-chunk intermediates
---gguf                GGUF transformer in models/unet, required on non-Blackwell
---encoder             text encoder filename (bf16 on non-Blackwell)
+--gguf                GGUF transformer in models/unet. Lighter; try int8 first
+--encoder             text encoder filename. Prefer --cached-cond and load none
 --clip-device         'cpu' or 'default'; omitted leaves the workflow value alone
 --decode-tile         VAEDecodeTiled tile_size, lower this for decode OOMs
 --decode-temporal     VAEDecodeTiled temporal_size (default 128)

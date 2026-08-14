@@ -187,8 +187,17 @@ for label, cond in (("-count_frames in notes", "-count_frames" in notes),
                     ("anullsrc rate matches README", "r=48000" in notes and "r=48000" in md),
                     ("size table matches README", "1472×832" in notes and "1536×864" not in notes),
                     ("API-key box explained", "API key" in notes and "switched off" in notes),
-                    ("non-Blackwell needs the encoder too",
-                     "text encoder* is Blackwell-only" in notes),
+                    # RETRACTED CLAIM, now guarded in the opposite direction. This used to assert
+                    # the notes SAID int8_convrot was Blackwell-only. Users then reported it
+                    # working on 3090, 4090 and 1070, and the likely real cause of our one failure
+                    # was comfy-kitchen 0.2.10. Assert the correction is present and the false
+                    # claim is gone, so it cannot be reintroduced by a regenerate.
+                    ("int8 Blackwell-only claim is retracted in the notes",
+                     "needs **Blackwell**" not in notes and "CORRECTION" in notes),
+                    ("notes point at comfy-kitchen before the GPU",
+                     "comfy-kitchen" in notes and "0.2.10" in notes),
+                    ("README carries the same retraction",
+                     "not Blackwell-only" in md and "0.2.10" in md),
                     ("python3 everywhere", "python3 redetail.py" in notes
                      and not re.search(r"(?<!3 )\bpython redetail\.py", md))):
     ok(label, cond)
