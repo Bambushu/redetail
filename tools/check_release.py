@@ -134,6 +134,15 @@ try:
 except FileNotFoundError:
     warn("ffmpeg not on PATH — mux behaviour not exercised")
 
+print("\n=== 3c. The documented 24GB recipe is complete ===")
+# Condensing the README once silently dropped --decode-temporal from this command. Decode is a
+# SEPARATE memory spike from sampling — a 4090 sampled all 8 steps and then OOMed in VAE decode —
+# so a low-VRAM recipe missing a decode flag is a recipe that fails at the last step.
+_cmd = md[md.find("--gguf LTX-2.5-Distilled"):]
+_cmd = _cmd[:_cmd.find("```")]
+for _flag in ("--encoder", "--clip-device", "--budget", "--decode-tile", "--decode-temporal"):
+    ok(f"4090 recipe keeps {_flag}", _flag in _cmd)
+
 print("\n=== 4. Every README dimension is on the /64 grid ===")
 # 2880x1632 (off-grid TARGET) and 432x768 (off-grid SOURCE) are the two counter-examples the
 # prose exists to explain. Anything else off-grid is a typo that would fail a real render.

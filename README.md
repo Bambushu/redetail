@@ -84,7 +84,7 @@ still fails, because the int8 *text encoder* is Blackwell-only too:
 python3 redetail.py clip.mp4 --scale 1.5 \
   --gguf LTX-2.5-Distilled-Q4_K_M.gguf \
   --encoder gemma4-12b-with-proj-ltx-2.5-bf16.safetensors \
-  --clip-device cpu --budget 150 --decode-tile 256
+  --clip-device cpu --budget 150 --decode-tile 256 --decode-temporal 32
 ```
 
 That needs [`city96/ComfyUI-GGUF`](https://github.com/city96/ComfyUI-GGUF) plus the Q4_K_M
