@@ -61,6 +61,17 @@ def swap(sg_name, node_id, new_type, widget):
     return sg, dropped
 
 
+# THE TWO CLIPLoaders ARE DELIBERATELY LEFT ALONE, and this looks wrong until you test it.
+# They keep pointing at the int8 encoder, which does not exist on a Mac install. A reviewer flagged
+# that as fatal: an empty clip_name enum should fail validation and block the queue.
+# MEASURED, on this exact condition: CLIPLoader's enum was [] (nothing in models/text_encoders that
+# it accepts), the queued prompt carried
+# clip_name='gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors', and the render returned
+# SUCCESS. ComfyUI prunes nodes that no output depends on BEFORE it validates them, so once nothing
+# consumes their CLIP they are neither validated nor loaded. That is the whole mechanism this
+# variant relies on, and retyping them would risk the widget-slot shift documented below for no
+# gain. Do not "fix" this without re-running that test.
+#
 # 1. The transformer. int8_convrot needs Blackwell tensor layouts; GGUF dequantizes in the kernel.
 sg, _ = swap("Load Models", 5602, "UnetLoaderGGUF", GGUF)
 inst = nodes[5004]["widgets_values"]
