@@ -299,6 +299,20 @@ class Comfy:
                             return out[k][0]
                 return None
 
+    def status(self, pid, every=5):
+        """Block until pid finishes, then return its status string.
+
+        wait() returns None for BOTH a failed job and a successful one with no output node, so a
+        graph whose only result is a side effect (--bootstrap-cond writes files and produces no
+        video) cannot tell the two apart. Reporting "saved" after the encoder failed to load is
+        worse than failing, because the missing files only surface on the NEXT run.
+        """
+        while True:
+            time.sleep(every)
+            h = json.loads(urllib.request.urlopen(f"{self.url}/history/{pid}", timeout=30).read())
+            if pid in h:
+                return h[pid].get("status", {}).get("status_str", "unknown")
+
     def download(self, item, dst):
         q = urllib.parse.urlencode({"filename": item["filename"],
                                     "subfolder": item.get("subfolder", ""),
@@ -378,8 +392,8 @@ def bootstrap_cond(url, encoder, name, clip_device=None):
     comfy = Comfy(url)
     oi = json.loads(urllib.request.urlopen(f"{url}/object_info", timeout=60).read())
     if "SaveConditioning" not in oi:
-        print("SaveConditioning is missing. Put tools/cond_cache_node.py in ComfyUI/custom_nodes/ "
-              "and RESTART ComfyUI, then re-run.")
+        print("SaveConditioning is missing. Copy the tools/comfyui_cond_cache/ DIRECTORY into "
+              "ComfyUI/custom_nodes/ and RESTART ComfyUI, then re-run.")
         return False
     # A GGUF encoder needs CLIPLoaderGGUF; a safetensors one needs CLIPLoader. Pick by extension
     # rather than making the user say which, since the filename already states it.
@@ -398,8 +412,12 @@ def bootstrap_cond(url, encoder, name, clip_device=None):
           "4": {"class_type": "SaveConditioning",
                 "inputs": {"conditioning": ["2", 0], "name": f"{name}_neg"}}}
     print(f"encoding the empty prompt with {encoder} (this is the only time it loads) ...")
-    if comfy.wait(comfy.submit(pr)) is None:
-        pass                      # wait() returns the output item; this graph has no video output
+    st = comfy.status(comfy.submit(pr))
+    if st != "success":
+        print(f"encode FAILED (status: {st}). Nothing was cached.\n"
+              "Check ComfyUI's log — the usual cause is the encoder not loading: a GGUF encoder "
+              "needs ComfyUI-GGUF with the gemma4 arch patch, and int8_convrot needs Blackwell.")
+        return False
     print(f"saved '{name}_pos' and '{name}_neg' in ComfyUI/output/cond_cache/.\n"
           f"From now on: --cached-cond {name}   (and drop --encoder)")
     return True
@@ -523,7 +541,8 @@ def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
     using_int8 = (gguf is None) or (encoder is None and not cached_cond)
     if cached_cond:
         say("LoadConditioning" in oi, f"cond cache node (for --cached-cond {cached_cond})",
-            "copy tools/cond_cache_node.py into ComfyUI/custom_nodes/ and RESTART ComfyUI")
+            "copy the tools/comfyui_cond_cache/ DIRECTORY into ComfyUI/custom_nodes/ and RESTART "
+            "ComfyUI. The shipped .pt files live inside it, so copy the folder, not just the .py")
         say(True, f"encoder will NOT be loaded — using cached '{cached_cond}_pos/_neg'",
             "")
         if "mps" in gpu.lower() or "apple" in gpu.lower():
