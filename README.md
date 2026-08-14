@@ -182,7 +182,60 @@ input                 video to upscale (omit with --setup)
 --clip-device         'cpu' or 'default'; omitted leaves the workflow value alone
 --decode-tile         VAEDecodeTiled tile_size, lower this for decode OOMs
 --decode-temporal     VAEDecodeTiled temporal_size (default 128)
+--bootstrap-cond      load the encoder ONCE, cache the empty-prompt conditioning, exit
+--cached-cond         load that cache instead of the encoder. Frees 5.6GB, output identical
 ```
+
+## Skip the text encoder entirely
+
+This graph's prompt boxes are **empty**, which makes its text conditioning a constant. So the only
+reason the text encoder is ever loaded is to compute the same 26KB tensor every run.
+
+**That tensor ships in this repo, so you never download the encoder at all.** Copy
+`tools/comfyui_cond_cache/` into `ComfyUI/custom_nodes/`, restart, and run:
+
+```bash
+python3 redetail.py clip.mp4 --gguf LTX-2.5-Distilled-Q4_K_M.gguf --cached-cond --scale 2.0
+```
+
+That drops **15.4GB** (int8) or **26GB** (bf16) from what you have to fetch, and on an RTX 5090,
+17 frames at 640x384 to 1280x768:
+
+| | time | peak VRAM |
+|---|---|---|
+| with the encoder | 29.2s | 30.4 GB of 32 |
+| `--cached-cond` | **24.0s** | **24.8 GB** |
+
+Output is **bit-identical**, PSNR inf against the encoder path. The stock graph peaks at 95% of a
+32GB board, so 5.6GB of headroom decides whether a card runs it.
+
+The shipped tensors came from the Q5_K_M encoder. `int8_convrot` is a different quantisation of the
+same model and its empty-string embedding is expected to be numerically close but is not verified
+identical. To make your own instead, which then takes precedence:
+
+```bash
+python3 redetail.py --bootstrap-cond --encoder <your encoder>      # loads it once, then never again
+```
+
+They are model output, so they carry the LTX-2 Community Licence, not this project's MIT grant. See
+[LICENSE](LICENSE).
+
+## Apple Silicon
+
+The GGUF path runs on an M-series Mac, and the cached conditioning above is what makes it fit: the
+only non-Blackwell encoder is the 26GB bf16 one. A Q5_K_M encoder, if you use one, needs the gemma4
+patch for `ComfyUI-GGUF`, which ships beside the encoder itself.
+
+**One ComfyUI core edit is required.** `comfy/ldm/lightricks/vae/na_diffusion_decoder.py` builds
+RoPE inverse frequencies in `float64`, which MPS does not support, so the run samples all the way
+through and then dies in `VAEDecodeTiled` with `Cannot convert a MPS Tensor to float64`. The
+function already returns float32, so compute it on the CPU and move the fp32 result across. Nothing
+else changes and CUDA is unaffected.
+
+Measured on an M5, 33 frames 640x384 to 1280x768: **4.4 min**, against a 5090 at the same geometry.
+Per frame-megapixel that is **6x slower than the 5090**, not the 30x other local ports cost. A full
+10s clip is roughly 34 min at 2x, 19 min at 1.5x. Quality holds: PSNR 37.4 dB against the pod's
+int8 render of the same source.
 
 Tested against ComfyUI 0.32.0 with ComfyUI-LTXVideo, `kornia==0.7.4` and `comfy-kitchen 0.2.26`,
 on an RTX PRO 6000 Blackwell and an RTX 4090, August 2026.

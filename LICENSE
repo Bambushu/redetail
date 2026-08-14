@@ -26,9 +26,10 @@ THE MIT GRANT ABOVE COVERS THIS PROJECT'S ORIGINAL CODE ONLY:
 
     redetail.py   build_ui_workflow.py   tools/   demos/
 
-IT DOES NOT COVER THE MODEL WEIGHTS, AND IT DOES NOT COVER THE WORKFLOW FILES
-IN workflows/. Those are governed by the LTX-2 Community License Agreement, a
-complete copy of which is included at:
+IT DOES NOT COVER THE MODEL WEIGHTS, IT DOES NOT COVER THE WORKFLOW FILES IN
+workflows/, AND IT DOES NOT COVER THE CACHED CONDITIONING TENSORS IN
+tools/comfyui_cond_cache/ (*.pt). Those are governed by the LTX-2 Community
+License Agreement, a complete copy of which is included at:
 
     workflows/LICENSE-LTX-2-Community.txt
 
@@ -55,6 +56,32 @@ repository above; build_ui_workflow.py prints the exact path if it is absent.
 
 These files are distributed EXCLUSIVELY under the LTX-2 Community License
 Agreement, per section 3(b). The MIT grant above does not apply to them.
+
+
+THE CACHED CONDITIONING TENSORS ARE MODEL OUTPUT
+------------------------------------------------
+tools/comfyui_cond_cache/redetail_pos.pt and redetail_neg.pt are the OUTPUT of
+Lightricks' LTX-2.5 text encoder, specifically
+
+    gemma4-12b-with-proj-ltx-2.5-Q5_K_M.gguf  (type ltxv)
+
+encoding the empty string. Each is a single float32 tensor of shape (1, 1, 6144)
+and roughly 26 KB. They exist because this graph's prompt boxes are empty, which
+makes that conditioning a constant, so shipping it means the text encoder never
+has to be downloaded or loaded at all.
+
+Being derived from the LTX-2.5 weights, they are treated here as material
+governed by the LTX-2 Community License Agreement rather than by the MIT grant,
+and the same use restrictions and commercial terms carry forward to you.
+
+They are quantisation-specific in origin: the int8_convrot encoder is a
+different quantisation of the same model, and its embedding of the empty string
+has NOT been verified byte-identical to these. It is expected to be numerically
+close. If you would rather not rely on that, regenerate them yourself with
+
+    python3 redetail.py --bootstrap-cond --encoder <your encoder>
+
+which writes to ComfyUI/output/cond_cache/ and takes precedence over these.
 
 
 THE WEIGHTS

@@ -337,7 +337,75 @@ NEEDED_NODES = ["LTXAddVideoICLoRAGuide", "LTXICLoRALoaderModelOnly", "EmptyLTXV
 BLACKWELL = ("5090", "5080", "5070", "RTX PRO 6000", "B200", "B300", "GB200")
 
 
-def doctor(url, gguf=None, encoder=None, clip_device=None):
+def use_cached_cond(pr, name, out_node="4852"):
+    """Replace the two CLIPTextEncode nodes with LoadConditioning and drop the encoder.
+
+    Both prompt boxes are empty, so this conditioning is a constant and caching it changes nothing
+    about the render. Verified: bit-identical output, PSNR inf against the encoder path.
+
+    The two ComfySwitchNodes in between are bypassed rather than left alone. Their selector is
+    StringContains('', 'ltxv_'), which is always False, so they always pick on_false — and the
+    GemmaAPITextEncode nodes on their dead branch name a checkpoint that a GGUF-only install does
+    not have. ComfyUI VALIDATES disabled branches, so those must go, not just be ignored.
+
+    Nodes are then pruned by REACHABILITY from the video output. Pruning by eye is what produced a
+    400 the first time; walking the graph from its output cannot pick the wrong set.
+    """
+    pr["5014:2483"] = {"class_type": "LoadConditioning", "inputs": {"name": f"{name}_pos"}}
+    pr["5014:2612"] = {"class_type": "LoadConditioning", "inputs": {"name": f"{name}_neg"}}
+    if "9002:9005" in pr:
+        pr["9002:9005"]["inputs"]["positive"] = ["5014:1241", 0]
+        pr["9002:9005"]["inputs"]["negative"] = ["5014:1241", 1]
+    keep, stack = set(), [out_node]
+    while stack:
+        n = stack.pop()
+        if n in keep or n not in pr:
+            continue
+        keep.add(n)
+        for b in pr[n].get("inputs", {}).values():
+            if isinstance(b, list) and b:
+                stack.append(b[0])
+    for dead in [k for k in pr if k not in keep]:
+        pr.pop(dead)
+    return pr
+
+
+def bootstrap_cond(url, encoder, name, clip_device=None):
+    """Load the encoder once, encode the empty prompt, save it, unload. Run this a single time."""
+    if not encoder:
+        print("--bootstrap-cond needs --encoder <filename> (the one time it IS loaded).")
+        return False
+    comfy = Comfy(url)
+    oi = json.loads(urllib.request.urlopen(f"{url}/object_info", timeout=60).read())
+    if "SaveConditioning" not in oi:
+        print("SaveConditioning is missing. Put tools/cond_cache_node.py in ComfyUI/custom_nodes/ "
+              "and RESTART ComfyUI, then re-run.")
+        return False
+    # A GGUF encoder needs CLIPLoaderGGUF; a safetensors one needs CLIPLoader. Pick by extension
+    # rather than making the user say which, since the filename already states it.
+    gguf_enc = encoder.lower().endswith(".gguf")
+    loader = "CLIPLoaderGGUF" if gguf_enc else "CLIPLoader"
+    if loader not in oi:
+        print(f"{loader} is missing (needed for {encoder}).")
+        return False
+    ins = {"clip_name": encoder, "type": "ltxv"}
+    if not gguf_enc and clip_device:
+        ins["device"] = clip_device
+    pr = {"1": {"class_type": loader, "inputs": ins},
+          "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 0]}},
+          "3": {"class_type": "SaveConditioning",
+                "inputs": {"conditioning": ["2", 0], "name": f"{name}_pos"}},
+          "4": {"class_type": "SaveConditioning",
+                "inputs": {"conditioning": ["2", 0], "name": f"{name}_neg"}}}
+    print(f"encoding the empty prompt with {encoder} (this is the only time it loads) ...")
+    if comfy.wait(comfy.submit(pr)) is None:
+        pass                      # wait() returns the output item; this graph has no video output
+    print(f"saved '{name}_pos' and '{name}_neg' in ComfyUI/output/cond_cache/.\n"
+          f"From now on: --cached-cond {name}   (and drop --encoder)")
+    return True
+
+
+def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
     """`--setup` must check the install the user is actually going to RUN.
 
     It used to take only the URL, so it always demanded the int8_convrot text encoder — which is
@@ -411,6 +479,8 @@ def doctor(url, gguf=None, encoder=None, clip_device=None):
     # command the user will actually run rather than the default int8 set.
     wanted = []
     for folder, cls, field, fname, size, repo in NEEDED_FILES:
+        if cached_cond and folder == "text_encoders":
+            continue          # no encoder is loaded at all, so requiring one is just wrong
         if gguf and folder == "diffusion_models":
             wanted.append(("unet", "UnetLoaderGGUF", "unet_name", gguf, "~13GB", repo))
         elif encoder and folder == "text_encoders":
@@ -448,7 +518,22 @@ def doctor(url, gguf=None, encoder=None, clip_device=None):
     # `int8_installed` only inspected the transformer folder, so `--gguf` without `--encoder` on a
     # non-Blackwell card reached the PASS branch — while at runtime the encoder stays int8 and the
     # render cannot load. Either unselected component is enough to make this an int8 run.
-    using_int8 = (gguf is None) or (encoder is None)
+    # --cached-cond means no encoder is loaded AT ALL, so "you selected no encoder" stops being
+    # evidence of an int8 run. Without this, the correct Mac setup gets told it is broken.
+    using_int8 = (gguf is None) or (encoder is None and not cached_cond)
+    if cached_cond:
+        say("LoadConditioning" in oi, f"cond cache node (for --cached-cond {cached_cond})",
+            "copy tools/cond_cache_node.py into ComfyUI/custom_nodes/ and RESTART ComfyUI")
+        say(True, f"encoder will NOT be loaded — using cached '{cached_cond}_pos/_neg'",
+            "")
+        if "mps" in gpu.lower() or "apple" in gpu.lower():
+            # Found the hard way: everything sampled fine on an M5 and died on the last node.
+            say(True, "Apple Silicon detected — see the MPS note below", "")
+            print("        NOTE  comfy/ldm/lightricks/vae/na_diffusion_decoder.py builds RoPE\n"
+                  "              frequencies in float64, which MPS does not support, so\n"
+                  "              VAEDecodeTiled raises 'Cannot convert a MPS Tensor to float64'.\n"
+                  "              Compute it on CPU and move the fp32 result to the device.\n"
+                  "              The function already returns float32, so nothing else changes.")
     if not is_blackwell and using_int8 and (int8_installed or encoder is None):
         say(False, f"int8_convrot weights present but '{gpu}' is not Blackwell",
             "int8_convrot needs Blackwell tensor layouts - these weights will NOT load on this "
@@ -505,10 +590,25 @@ def main():
                         "256 works on 24GB.")
     p.add_argument("--decode-temporal", type=int, default=None,
                    help="VAEDecodeTiled temporal_size (default 128). Lower with --decode-tile.")
+    # BOTH prompt boxes in this graph are empty, so the text conditioning is a constant. Encode it
+    # once, cache ~26KB, and no render ever loads the encoder again. Measured on an RTX 5090:
+    # peak 30.4GB -> 24.8GB and 29.2s -> 24.0s, output bit-identical (PSNR inf).
+    p.add_argument("--cached-cond", nargs="?", const="redetail", default=None, metavar="NAME",
+                   help="skip the text encoder entirely and load a cached conditioning written by "
+                        "--bootstrap-cond. This is what makes the Mac path viable: the only "
+                        "non-Blackwell encoder is 26GB bf16, and dropping it frees that memory "
+                        "for the transformer.")
+    p.add_argument("--bootstrap-cond", nargs="?", const="redetail", default=None, metavar="NAME",
+                   help="load the encoder ONCE, encode the empty prompt, save it under NAME, and "
+                        "exit. Needs --encoder. Run this a single time, then use --cached-cond.")
     a = p.parse_args()
 
+    if a.bootstrap_cond:
+        sys.exit(0 if bootstrap_cond(a.comfy.rstrip("/"), a.encoder, a.bootstrap_cond,
+                                     a.clip_device) else 1)
     if a.setup:
-        sys.exit(0 if doctor(a.comfy.rstrip("/"), a.gguf, a.encoder, a.clip_device) else 1)
+        sys.exit(0 if doctor(a.comfy.rstrip("/"), a.gguf, a.encoder, a.clip_device,
+                             a.cached_cond) else 1)
     if not a.input:
         sys.exit("Give me a video, or run with --setup to check your install.")
     src = os.path.abspath(a.input)
@@ -614,6 +714,10 @@ def main():
                     pr[_n]["inputs"]["clip_name"] = a.encoder
                 if a.clip_device and "device" in pr[_n]["inputs"]:
                     pr[_n]["inputs"]["device"] = a.clip_device
+        # LAST, because it prunes: any node this drops must already have been patched above, and
+        # anything it keeps still carries those edits.
+        if a.cached_cond:
+            pr = use_cached_cond(pr, a.cached_cond, N_SAVE)
         if a.decode_tile or a.decode_temporal:
             _d = pr.get("5518:5538", {}).get("inputs", {})
             if a.decode_tile:

@@ -99,7 +99,11 @@ ok("cleanup tracks exact paths, not a name snapshot",
    "preexisting" not in src and "created.append" in src)
 ok("fixed scratch names are per-run unique", "concat_{RID}.txt" in src)
 ok("int8 use derived from selections, not installed files",
-   "using_int8 = (gguf is None) or (encoder is None)" in src)
+   "using_int8 = (gguf is None) or (encoder is None and not cached_cond)" in src)
+# --cached-cond loads NO encoder, so "no encoder selected" stops being evidence of an int8 run.
+# Without this clause the correct Mac setup is told it is broken.
+ok("cached conditioning exempts the encoder requirement",
+   "if cached_cond and folder == \"text_encoders\":" in src)
 ok("unselected GGUF does not pass --setup", "but you did not " in src)
 ok("ffconcat paths escaped", "replace(\"'\", \"'\\\\''\")" in src)
 
@@ -228,6 +232,37 @@ for dirpath, dirnames, filenames in os.walk(REPO):
         t = "\n".join(l for l in t.splitlines() if "LEAKS = (" not in l)
         found = [k for k in LEAKS if k in t]
         ok(os.path.relpath(p, REPO), not found, f"found {found}")
+
+print("\n=== 11. Shipped conditioning tensors ===")
+# These make the text encoder an optional download rather than a required one, so their presence
+# is a shipping guarantee, not a nicety. torch is NOT required to run this check -- it is a
+# maintainer tool that must work on a bare machine, so the tensor shape is only asserted when
+# torch happens to be importable.
+_cc = os.path.join(REPO, "tools/comfyui_cond_cache")
+ok("cond cache node ships as a package", os.path.isfile(f"{_cc}/__init__.py"))
+for _n in ("redetail_pos", "redetail_neg"):
+    _p = f"{_cc}/{_n}.pt"
+    _have = os.path.isfile(_p)
+    ok(f"{_n}.pt shipped", _have,
+       f"{os.path.getsize(_p)} bytes" if _have else "MISSING")
+    # Small enough that shipping it is the whole point. If this balloons, something is wrong.
+    if _have:
+        ok(f"{_n}.pt under 64KB", os.path.getsize(_p) < 65536)
+try:
+    import torch as _t
+    _c = _t.load(f"{_cc}/redetail_pos.pt", map_location="cpu", weights_only=False)
+    ok("shipped conditioning has the expected shape",
+       _t.is_tensor(_c[0][0]) and tuple(_c[0][0].shape) == (1, 1, 6144),
+       str(tuple(_c[0][0].shape)))
+except ImportError:
+    warn("torch not importable — tensor shape not verified")
+# They are model OUTPUT derived from gated weights, so the licence must say so. Shipping them under
+# the MIT grant by omission is exactly the failure this guards against.
+_lic = open(os.path.join(REPO, "LICENSE")).read()
+ok("LICENSE names the .pt files as LTX-2 material", "comfyui_cond_cache" in _lic)
+ok("LICENSE states which encoder produced them", "Q5_K_M" in _lic)
+ok("LICENSE flags the int8 quantisation caveat", "int8_convrot encoder is a" in _lic)
+ok("README documents --cached-cond", "--cached-cond" in md)
 
 print("\n=== 10. Live install check ===")
 try:

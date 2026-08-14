@@ -379,11 +379,12 @@ def wipe_segment(left_v, right_v, w, h, start, dur, label, lname, rname, dst,
        "-an", dst)
 
 
-def concat(parts, dst):
+def concat(parts, dst, crf=17):
     lst = f"{OUT}/.concat.txt"
     open(lst, "w").write("".join(f"file '{os.path.abspath(p)}'\n" for p in parts))
     sh("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
-       "-c:v", "libx264", "-crf", "17", "-pix_fmt", "yuv420p", "-movflags", "+faststart", dst)
+       "-c:v", "libx264", "-crf", str(crf), "-pix_fmt", "yuv420p",
+       "-movflags", "+faststart", dst)
     os.remove(lst)
     for p in parts:
         os.remove(p)
@@ -415,6 +416,89 @@ def reel_lanczos(scale="2.0", w=1280, h=768):
     dst = f"{OUT}/reel_lanczos_vs_redetail_{scale}x.mp4"
     concat(parts, dst)
     print(f"  {os.path.basename(dst)}  ({len(parts)} scenes, {len(parts)*SEG:.0f}s)")
+    return dst
+
+
+# --- the version that survives a platform re-encode ------------------------------------------
+#
+# Reddit's 1280x768 rendition of the reel above came back visibly mushed, which is not a Reddit
+# quirk: every platform re-encodes, and a lossy codec discards fine high-frequency detail FIRST.
+# That is precisely the signal this comparison exists to show, so the reel was asking the one
+# question the delivery pipeline is guaranteed to destroy.
+#
+# Two fixes, both about WHERE the signal sits rather than how much of it there is:
+#   1. deliver a 1920x1080 canvas. Bitrate ladders allocate by resolution class before a single
+#      frame is analysed, so a 768p upload is penalised on arrival regardless of its own bitrate.
+#   2. magnify a 100% crop with NEAREST NEIGHBOUR. That moves the detail from a 1-pixel period,
+#      quantised away first, to a `mag`-pixel one that survives, and it does it without
+#      resampling: every output pixel is a source pixel repeated, not a blend of neighbours.
+#
+# Honesty note, because this is the kind of trick that shades into cheating: both sides get the
+# identical crop and the identical magnification, the left is still the Lanczos'd source at the
+# same pixel count, and the frame is labelled as a magnified crop. Nothing is sharpened.
+CROP_REEL = (640, 360)     # window in OUTPUT pixels. x3 lands on exactly 1920x1080.
+MAG = 3
+
+
+def crop_wipe_segment(left_v, right_v, ow, oh, box, mag, start, dur, label, dst):
+    """wipe_segment, but on a nearest-neighbour magnified 100% crop instead of the whole frame."""
+    x, y, cw, ch = box
+    W, H = cw * mag, ch * mag
+    # Left is Lanczos'd to the output size BEFORE cropping, so both sides crop the same region of
+    # the same-sized picture. Cropping first and scaling after would compare different regions.
+    lchain = (f"scale={ow}:{oh}:flags=lanczos,crop={cw}:{ch}:{x}:{y},"
+              f"scale={W}:{H}:flags=neighbor")
+    rchain = f"crop={cw}:{ch}:{x}:{y},scale={W}:{H}:flags=neighbor"
+    sh("ffmpeg", "-y", "-v", "error", "-i", left_v, "-i", right_v, "-filter_complex",
+       f"[0:v]trim=start={start}:duration={dur},setpts=PTS-STARTPTS,{lchain},setsar=1,"
+       f"format=gbrp[l];"
+       f"[1:v]trim=start={start}:duration={dur},setpts=PTS-STARTPTS,{rchain},setsar=1,"
+       f"format=gbrp[r];"
+       f"[l][r]blend="
+       f"c0_expr='if(lt(abs(X-W*T/{dur:.3f}),4),138,if(lt(X,W*T/{dur:.3f}),B,A))':"
+       f"c1_expr='if(lt(abs(X-W*T/{dur:.3f}),4),76,if(lt(X,W*T/{dur:.3f}),B,A))':"
+       f"c2_expr='if(lt(abs(X-W*T/{dur:.3f}),4),255,if(lt(X,W*T/{dur:.3f}),B,A))',"
+       f"drawtext=fontfile={BOLD}:text='REDETAIL':x=30:y=30:fontsize=44:fontcolor=white:"
+       f"box=1:boxcolor=black@0.55:boxborderw=14,"
+       f"drawtext=fontfile={BOLD}:text='LANCZOS':x=w-tw-30:y=30:fontsize=44:fontcolor=white:"
+       f"box=1:boxcolor=black@0.55:boxborderw=14,"
+       f"drawtext=fontfile={BLACK}:text='{label}':x=30:y=h-th-30:fontsize=34:fontcolor=0xFF8A4C:"
+       f"box=1:boxcolor=black@0.55:boxborderw=14[v]",
+       "-map", "[v]", "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", "-r", "24",
+       "-an", dst)
+
+
+def reel_crop_1080(scale="2.0", mag=MAG):
+    """Lanczos vs ReDetail on a magnified 100% crop, sized to survive a platform re-encode."""
+    cw, ch = CROP_REEL
+    ow, oh = (960, 576) if scale == "1.5" else (1280, 768)
+    parts = []
+    for name, steps, label in REEL:
+        row = next((s for s in SCENES if s[0] == name and s[1] == steps), None)
+        if not row:
+            continue
+        stem, t = row[4], row[2]
+        src, up = f"{REND}/{stem}.mp4", f"{REND}/up_{scale}x/{stem}_{scale}x.mp4"
+        if not (os.path.exists(src) and os.path.exists(up)):
+            print(f"  crop reel: skipping {name} (missing input)")
+            continue
+        probe = f"{OUT}/.croproi_{name}.png"
+        grab(src, t, probe)
+        # Same rule as the stills: the ROI is scored on the SOURCE, never on the ReDetail frame.
+        x, y = pick_roi(Image.open(probe), ow, oh, cw, ch)
+        os.remove(probe)
+        x, y = min(max(x, 0), ow - cw), min(max(y, 0), oh - ch)
+        p = f"{OUT}/.cseg_{name}.mp4"
+        crop_wipe_segment(src, up, ow, oh, (x, y, cw, ch), mag, 1.0, SEG,
+                          f"{label}  ·  {scale}x  ·  100% CROP, {mag}x NEAREST NEIGHBOUR", p)
+        parts.append(p)
+        print(f"  crop reel segment: {name}  roi=({x},{y})")
+    if not parts:
+        return None
+    dst = f"{OUT}/reel_crop1080_{scale}x.mp4"
+    concat(parts, dst, crf=15)
+    print(f"  {os.path.basename(dst)}  ({len(parts)} scenes, {len(parts)*SEG:.0f}s, "
+          f"{cw*mag}x{ch*mag})")
     return dst
 
 
@@ -522,11 +606,21 @@ def scale_ab(name, steps, t, desc):
 
 
 def scale_toggle(name, steps, t, desc, hold=0.8, cycles=5):
-    """A/B flicker between 1.5x and 2.0x on ONE frozen frame and ONE crop.
+    """SOURCE -> 1.5x -> 2.0x flicker on ONE frozen frame and ONE crop.
 
-    Toggling in place is how you compare two nearly-identical images: the eye is poor at absolute
+    Toggling in place is how you compare near-identical images: the eye is poor at absolute
     sharpness and very good at spotting what MOVES between two states. The frame is frozen on
     purpose — flickering live video just reads as video.
+
+    GEOMETRY, which an earlier version got wrong: everything is compared at 960x576, the 1.5x's
+    OWN native size. 1.5x is untouched and 2.0x is DOWNSCALED to meet it. The old version enlarged
+    the 1.5x to 1280x768 instead, which put resampling blur into one of the two things being
+    compared and quietly flattered 2.0x. Same rule as scale_ab now.
+
+    The source panel is the one place Lanczos is unavoidable: 640x384 cannot be shown beside the
+    others without resampling it, and Lanczos is the honest baseline because it is literally what
+    you would do instead of running the tool. It is labelled as resampled so nobody mistakes it
+    for a model output.
     """
     stem = next((s[4] for s in SCENES if s[0] == name and s[1] == steps), None)
     src = f"{REND}/{stem}.mp4"
@@ -534,25 +628,31 @@ def scale_toggle(name, steps, t, desc, hold=0.8, cycles=5):
     if not all(os.path.exists(p) for p in (src, a15, a20)):
         print(f"  toggle: skipping {name} (missing input)")
         return None
-    W, H = 1280, 768
-    s_png = f"{OUT}/.t_s.png"
-    grab(src, t, s_png)
-    grab(a15, t, f"{OUT}/.t_15n.png")
-    grab(a20, t, f"{OUT}/.t_20.png")
-    lanczos(f"{OUT}/.t_15n.png", W, H, f"{OUT}/.t_15.png")
+    W, H = 960, 576
+    s_png, s_native = f"{OUT}/.t_src.png", f"{OUT}/.t_srcn.png"
+    grab(src, t, s_native)
+    grab(a15, t, f"{OUT}/.t_15.png")                  # already 960x576, untouched
+    grab(a20, t, f"{OUT}/.t_20n.png")
+    lanczos(f"{OUT}/.t_20n.png", W, H, f"{OUT}/.t_20.png")     # DOWN-scale only
+    lanczos(s_native, W, H, s_png)                    # the unavoidable one, and it is the baseline
 
     cw, ch = CROP
-    x, y = pick_roi(Image.open(s_png), W, H, cw, ch)
-    x, y = min(x, W - cw), min(y, H - ch)
+    # Scored on the SOURCE, never on a ReDetail frame — scoring a result picks whichever tile the
+    # model invented in most.
+    x, y = pick_roi(Image.open(s_native), W, H, cw, ch)
+    x, y = min(max(x, 0), W - cw), min(max(y, 0), H - ch)
     box = (x, y, x + cw, y + ch)
     frames = []
-    for key, lbl in (("15", "REDETAIL 1.5x"), ("20", "REDETAIL 2.0x")):
+    panels = (("src", "SOURCE", "640x384, Lanczos to 960x576", DIM),
+              ("15", "REDETAIL 1.5x", "960x576 native, untouched", FG),
+              ("20", "REDETAIL 2.0x", "1280x768 downscaled to 960x576", ACCENT))
+    for key, lbl, sub, col in panels:
         im = Image.open(f"{OUT}/.t_{key}.png").crop(box).convert("RGB")
         card = Image.new("RGB", (cw, ch + 92), BG)
         card.paste(im, (0, 72))
         d = ImageDraw.Draw(card)
-        d.text((14, 12), lbl, font=font(BLACK, 26), fill=ACCENT if key == "20" else FG)
-        d.text((14, 44), f"{desc} · same frame, same crop, 100% pixels",
+        d.text((14, 12), lbl, font=font(BLACK, 26), fill=col)
+        d.text((14, 44), f"{desc} · {sub} · same frame, same crop",
                font=font(REG, 14), fill=DIM)
         p = f"{OUT}/.tog_{key}.png"
         card.save(p)
@@ -561,15 +661,17 @@ def scale_toggle(name, steps, t, desc, hold=0.8, cycles=5):
     lst = f"{OUT}/.tog.txt"
     with open(lst, "w") as fh:
         for _ in range(cycles):
-            for p in frames:
-                fh.write(f"file '{os.path.abspath(p)}'\nduration {hold}\n")
+            for i, p in enumerate(frames):
+                # Hold the source a little longer: it is the reference the other two are read
+                # against, and at equal timing a 3-way cycle reads as a blur of three states.
+                fh.write(f"file '{os.path.abspath(p)}'\nduration {hold * (1.5 if i == 0 else 1)}\n")
         fh.write(f"file '{os.path.abspath(frames[-1])}'\n")
-    dst = f"{OUT}/toggle_{name}_{steps}st_1.5x_vs_2.0x.mp4"
+    dst = f"{OUT}/toggle_{name}_{steps}st_source_1.5x_2.0x.mp4"
     sh("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
        "-vf", "fps=24,format=yuv420p", "-c:v", "libx264", "-crf", "14",
        "-movflags", "+faststart", dst)
-    for f in (lst, *frames, f"{OUT}/.t_s.png", f"{OUT}/.t_15.png", f"{OUT}/.t_15n.png",
-              f"{OUT}/.t_20.png"):
+    for f in (lst, *frames, s_png, s_native, f"{OUT}/.t_15.png", f"{OUT}/.t_20.png",
+              f"{OUT}/.t_20n.png"):
         if os.path.exists(f):
             os.remove(f)
     print(f"  {os.path.basename(dst)}")
@@ -632,10 +734,17 @@ if __name__ == "__main__":
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--crop", default=None, help="100%% crop window, e.g. 600x450")
     ap.add_argument("--reels", action="store_true", help="build the two reels and nothing else")
+    ap.add_argument("--crop-reel", action="store_true",
+                    help="1080p nearest-neighbour crop reel, for platforms that re-encode")
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     if a.crop:
         CROP = tuple(int(v) for v in a.crop.lower().split("x"))
+
+    if a.crop_reel:
+        print("reel: 1080p nearest-neighbour crop")
+        reel_crop_1080()
+        sys.exit(0)
 
     if a.reels:
         print("reel: Lanczos vs ReDetail")
