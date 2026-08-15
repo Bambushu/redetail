@@ -178,12 +178,25 @@ ffmpeg -i ok.mp4 -frames:v 1 first_frame.png
 Then load `ok.mp4` into **Source Video** and `first_frame.png` into **Load Image**
 (it ships with a REPLACE ME placeholder).
 
-### Ignore the API key box
+### Ignore the API key box — the enhancer is now disconnected
 
 **Input Parameters** exposes `LTX API key`, `enhance_seed` and an effective-prompt preview. Those
-belong to the prompt-enhancer, which is **switched off and not used** — this graph runs entirely
-locally and needs no account, no key and no network. The fields are visible only because ComfyUI
-still validates the disabled branch. Leave them empty.""",
+belong to the prompt-enhancer. This graph runs entirely locally and needs no account, no key and
+no network. Leave them empty.
+
+⚠️ **The API branch has been REMOVED, not just switched off,** because leaving it attached broke
+the workflow for a whole class of users. ComfyUI validates every node upstream of an output *even
+on a branch that is never taken*, and `GemmaAPITextEncode` reads its `ckpt_name` list from
+`models/diffusion_models`. Anyone whose transformer lives elsewhere — everyone on the GGUF path —
+got `ckpt_name: '…' not in []` and could not queue at all. Disabling the enhancer did not help,
+because the failure was at validation, not execution.
+
+The conditioning is now wired straight from `LTXVConditioning`, so those nodes are unreachable and
+ComfyUI prunes them before validating. **The render is unchanged** (verified bit-identical, PSNR
+inf): that branch only activated if your API key contained `ltxv_`, and it needed the local
+checkpoint anyway to read its model id — so it could never have worked on the installs this broke.
+If you wanted it to avoid the 15GB encoder download, use the shipped cached conditioning instead,
+which does that offline and for free.""",
 
     # 2 — lookup table first, rule as a footnote
     9003: """## 2 — Set your target size

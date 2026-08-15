@@ -113,7 +113,7 @@
    "title": "Inputs",
    "properties": {},
    "widgets_values": [
-    "## 1 \u2014 Prep your clip (before you load it)\n\n**a. It needs an audio track.** This graph encodes audio and video together and stops with\n`VAEEncodeAudio: input audio is None` on a silent file. AI-generated clips are usually silent:\n\n```\nffmpeg -i in.mp4 -f lavfi -i anullsrc=r=48000:cl=stereo -shortest -c:v copy -c:a aac ok.mp4\n```\n\n**b. Trim to 8n+1 frames.** Any other length **silently loses frames off the end**.\nValid: 9, 17, 25 \u2026 121, 129, 137, 145, 249 \u2026 (`129 frames \u2248 5.4s @ 24fps`)\n\n```\nffprobe -v error -count_frames -select_streams v:0 \\\n        -show_entries stream=nb_read_frames -of csv=p=0 in.mp4\nffmpeg -i in.mp4 -frames:v 129 -c:a copy ok.mp4\n```\n\n`-count_frames` decodes and counts. Slower, but plenty of containers store no frame count and\nreport `N/A` \u2014 which is exactly when you need the number.\n\n**c. Grab the first frame** \u2014 the Load Image node needs it:\n\n```\nffmpeg -i ok.mp4 -frames:v 1 first_frame.png\n```\n\nThen load `ok.mp4` into **Source Video** and `first_frame.png` into **Load Image**\n(it ships with a REPLACE ME placeholder).\n\n### Ignore the API key box\n\n**Input Parameters** exposes `LTX API key`, `enhance_seed` and an effective-prompt preview. Those\nbelong to the prompt-enhancer, which is **switched off and not used** \u2014 this graph runs entirely\nlocally and needs no account, no key and no network. The fields are visible only because ComfyUI\nstill validates the disabled branch. Leave them empty."
+    "## 1 \u2014 Prep your clip (before you load it)\n\n**a. It needs an audio track.** This graph encodes audio and video together and stops with\n`VAEEncodeAudio: input audio is None` on a silent file. AI-generated clips are usually silent:\n\n```\nffmpeg -i in.mp4 -f lavfi -i anullsrc=r=48000:cl=stereo -shortest -c:v copy -c:a aac ok.mp4\n```\n\n**b. Trim to 8n+1 frames.** Any other length **silently loses frames off the end**.\nValid: 9, 17, 25 \u2026 121, 129, 137, 145, 249 \u2026 (`129 frames \u2248 5.4s @ 24fps`)\n\n```\nffprobe -v error -count_frames -select_streams v:0 \\\n        -show_entries stream=nb_read_frames -of csv=p=0 in.mp4\nffmpeg -i in.mp4 -frames:v 129 -c:a copy ok.mp4\n```\n\n`-count_frames` decodes and counts. Slower, but plenty of containers store no frame count and\nreport `N/A` \u2014 which is exactly when you need the number.\n\n**c. Grab the first frame** \u2014 the Load Image node needs it:\n\n```\nffmpeg -i ok.mp4 -frames:v 1 first_frame.png\n```\n\nThen load `ok.mp4` into **Source Video** and `first_frame.png` into **Load Image**\n(it ships with a REPLACE ME placeholder).\n\n### Ignore the API key box \u2014 the enhancer is now disconnected\n\n**Input Parameters** exposes `LTX API key`, `enhance_seed` and an effective-prompt preview. Those\nbelong to the prompt-enhancer. This graph runs entirely locally and needs no account, no key and\nno network. Leave them empty.\n\n\u26a0\ufe0f **The API branch has been REMOVED, not just switched off,** because leaving it attached broke\nthe workflow for a whole class of users. ComfyUI validates every node upstream of an output *even\non a branch that is never taken*, and `GemmaAPITextEncode` reads its `ckpt_name` list from\n`models/diffusion_models`. Anyone whose transformer lives elsewhere \u2014 everyone on the GGUF path \u2014\ngot `ckpt_name: '\u2026' not in []` and could not queue at all. Disabling the enhancer did not help,\nbecause the failure was at validation, not execution.\n\nThe conditioning is now wired straight from `LTXVConditioning`, so those nodes are unreachable and\nComfyUI prunes them before validating. **The render is unchanged** (verified bit-identical, PSNR\ninf): that branch only activated if your API key contained `ltxv_`, and it needed the local\ncheckpoint anyway to read its model id \u2014 so it could never have worked on the installs this broke.\nIf you wanted it to avoid the 15GB encoder download, use the shipped cached conditioning instead,\nwhich does that offline and for free.\n"
    ],
    "color": "#432",
    "bgcolor": "#653"
@@ -710,16 +710,12 @@
     {
      "name": "width",
      "type": "INT",
-     "links": [
-      13768
-     ]
+     "links": []
     },
     {
      "name": "height",
      "type": "INT",
-     "links": [
-      13769
-     ]
+     "links": []
     },
     {
      "name": "length",
@@ -2753,7 +2749,8 @@
         "type": "CONDITIONING",
         "slot_index": 0,
         "links": [
-         13786
+         13786,
+         13790
         ]
        },
        {
@@ -2762,7 +2759,8 @@
         "type": "CONDITIONING",
         "slot_index": 1,
         "links": [
-         13789
+         13789,
+         13791
         ]
        }
       ],
@@ -2817,9 +2815,7 @@
         "localized_name": "output",
         "name": "output",
         "type": "CONDITIONING",
-        "links": [
-         13791
-        ]
+        "links": []
        }
       ],
       "title": "negative conditioning source - If/Else Switch",
@@ -2872,9 +2868,7 @@
         "localized_name": "output",
         "name": "output",
         "type": "CONDITIONING",
-        "links": [
-         13790
-        ]
+        "links": []
        }
       ],
       "title": "positive conditioning source - If/Else Switch",
@@ -3282,7 +3276,7 @@
      },
      {
       "id": 13790,
-      "origin_id": 5558,
+      "origin_id": 1241,
       "origin_slot": 0,
       "target_id": -20,
       "target_slot": 3,
@@ -3290,8 +3284,8 @@
      },
      {
       "id": 13791,
-      "origin_id": 5560,
-      "origin_slot": 0,
+      "origin_id": 1241,
+      "origin_slot": 1,
       "target_id": -20,
       "target_slot": 4,
       "type": "CONDITIONING"
