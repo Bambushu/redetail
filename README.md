@@ -233,9 +233,18 @@ They are model output, so they carry the LTX-2 Community Licence, not this proje
 
 ## Apple Silicon
 
-The GGUF path runs on an M-series Mac, and the cached conditioning above is what makes it fit: the
-only non-Blackwell encoder is the 26GB bf16 one. A Q5_K_M encoder, if you use one, needs the gemma4
-patch for `ComfyUI-GGUF`, which ships beside the encoder itself.
+**Use `workflows/ReDetail_LTX25_upscale_MAC.json`**, not the main one. It is the same graph with the
+GGUF transformer wired in and the text encoder removed entirely, so nothing in it will try to load a
+model you do not have. Its own note panel carries the Mac-specific setup.
+
+Measured on an M5: 33 frames 640x384 to 1280x768 in **4.4 min**, three models loaded (transformer
+and the two VAEs), no encoder. Per frame-megapixel that is about **6x slower than an RTX 5090**. A
+10s clip is roughly 34 min at 2x, 19 min at 1.5x. PSNR 37.4 dB against the same source rendered on
+the int8 path, so quality holds.
+
+The cached conditioning above is what makes it fit at all: the only non-Blackwell encoder is the
+26GB bf16 one. A Q5_K_M encoder, if you use one instead, needs the gemma4 patch for `ComfyUI-GGUF`,
+which ships beside the encoder itself.
 
 **One ComfyUI core edit is required.** `comfy/ldm/lightricks/vae/na_diffusion_decoder.py` builds
 RoPE inverse frequencies in `float64`, which MPS does not support, so the run samples all the way

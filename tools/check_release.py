@@ -272,6 +272,10 @@ ok("LICENSE names the .pt files as LTX-2 material", "comfyui_cond_cache" in _lic
 ok("LICENSE states which encoder produced them", "Q5_K_M" in _lic)
 ok("LICENSE flags the int8 quantisation caveat", "int8_convrot encoder is a" in _lic)
 ok("README documents --cached-cond", "--cached-cond" in md)
+# The Mac variant shipped without the README ever naming it, so a Mac user would have
+# followed the manual GGUF instructions instead of the graph built for them.
+ok("README points Mac users at the MAC workflow",
+   "ReDetail_LTX25_upscale_MAC.json" in md)
 
 print("\n=== 12. The prompt-enhancer branch stays disconnected ===")
 # A user could not queue at all: ComfyUI validates nodes upstream of an output even on a branch
