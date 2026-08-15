@@ -273,6 +273,27 @@ ok("LICENSE states which encoder produced them", "Q5_K_M" in _lic)
 ok("LICENSE flags the int8 quantisation caveat", "int8_convrot encoder is a" in _lic)
 ok("README documents --cached-cond", "--cached-cond" in md)
 
+print("\n=== 12. The prompt-enhancer branch stays disconnected ===")
+# A user could not queue at all: ComfyUI validates nodes upstream of an output even on a branch
+# that is never taken, and GemmaAPITextEncode reads ckpt_name from models/diffusion_models, which
+# is empty for everyone on the GGUF path. The fix is a rewire, and it lives in a GENERATED file --
+# so assert it in the shipped artefacts, not just in the builder that produces them.
+_api = json.load(open(os.path.join(REPO, "workflows/ltx25_upscale_API.json")))
+ok("API graph takes conditioning straight from LTXVConditioning",
+   _api["9002:9005"]["inputs"]["positive"] == ["5014:1241", 0]
+   and _api["9002:9005"]["inputs"]["negative"] == ["5014:1241", 1])
+for _wf in ("workflows/ReDetail_LTX25_upscale.json", "workflows/ReDetail_LTX25_upscale_MAC.json"):
+    _d = json.load(open(os.path.join(REPO, _wf)))
+    _ip = next((s for s in _d["definitions"]["subgraphs"]
+                if s.get("name") == "Input Parameters"), None)
+    _origins = {l.get("id"): l.get("origin_id") for l in (_ip or {}).get("links", [])}
+    ok(f"{os.path.basename(_wf)}: enhancer switches bypassed",
+       _origins.get(13790) == 1241 and _origins.get(13791) == 1241,
+       f"13790<-{_origins.get(13790)} 13791<-{_origins.get(13791)}")
+ok("builder reproduces the rewire (not just the checked-in file)",
+   "Expected to rewire 2 conditioning links past the switches"
+   in open(os.path.join(REPO, "build_ui_workflow.py")).read())
+
 print("\n=== 10. Live install check ===")
 try:
     urllib.request.urlopen(f"{COMFY}/system_stats", timeout=8)

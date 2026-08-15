@@ -79,6 +79,40 @@ for _sg in d["definitions"]["subgraphs"]:
 if _resized != 1:
     raise SystemExit(f"Expected exactly 1 reference-resize node, found {_resized}.")
 
+# 5. DISCONNECT THE PROMPT-ENHANCER BRANCH. Not cosmetic: ComfyUI validates every node upstream of
+# an output even on a branch that is never taken, and GemmaAPITextEncode reads its ckpt_name list
+# from models/diffusion_models. Anyone whose transformer lives elsewhere (the whole GGUF path) got
+# "ckpt_name: '...' not in []" and could not queue at all. Disabling the enhancer did not help,
+# because the failure is at validation, not execution.
+#
+# Rewiring the two subgraph outputs straight to LTXVConditioning makes the switches AND the Gemma
+# nodes unreachable, and unreachable nodes are pruned before validation. Verified bit-identical
+# output (PSNR inf). It DOES remove the ltxv_ API-key path, which is deliberate: that branch needed
+# the local checkpoint to read its model id, so it could never work on the installs it was
+# breaking, and the shipped cached conditioning covers its only real use offline.
+_ip = next((s for s in d["definitions"]["subgraphs"] if s.get("name") == "Input Parameters"), None)
+if _ip is None:
+    raise SystemExit("Input Parameters subgraph is gone — do not ship an unpatched enhancer branch")
+_moved = 0
+for _l in _ip["links"]:
+    if _l.get("id") == 13790 and _l.get("origin_id") == 5558:
+        _l["origin_id"], _l["origin_slot"] = 1241, 0      # LTXVConditioning slot 0 = positive
+        _moved += 1
+    elif _l.get("id") == 13791 and _l.get("origin_id") == 5560:
+        _l["origin_id"], _l["origin_slot"] = 1241, 1      # slot 1 = negative
+        _moved += 1
+if _moved != 2:
+    raise SystemExit(f"Expected to rewire 2 conditioning links past the switches, moved {_moved}. "
+                     "Upstream graph changed — fix this before shipping, or the prompt enhancer "
+                     "will block every non-default model layout again.")
+for _n in _ip["nodes"]:
+    if _n["id"] in (5558, 5560):                 # switches no longer own the links they fed
+        for _o in _n.get("outputs", []):
+            _o["links"] = [x for x in (_o.get("links") or []) if x not in (13790, 13791)]
+    if _n["id"] == 1241:                         # and LTXVConditioning now owns them
+        _n["outputs"][0]["links"] = [13786, 13790]
+        _n["outputs"][1]["links"] = [13789, 13791]
+
 NOTES = {
     # 0 — feasibility and install FIRST. This is the only panel that can fail 100% of users.
     5526: """# ReDetail — generative video re-detailer
