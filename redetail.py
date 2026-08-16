@@ -745,6 +745,23 @@ def main():
                     pr[_n]["inputs"]["clip_name"] = a.encoder
                 if a.clip_device and "device" in pr[_n]["inputs"]:
                     pr[_n]["inputs"]["device"] = a.clip_device
+        # ⚠ DO NOT drop CreateVideo's `audio` input to dodge the AAC NaN crash described below.
+        # It looks like free money — this graph's generated track is thrown away whenever
+        # --audio original re-muxes the source — but removing the link makes SaveVideo hand back a
+        # near-EMPTY video (measured: a 41-frame 2176x1216 chunk came back at ~0MB and decoded to
+        # flat black, and it passed every frame-count gate on the way out). The audio input is
+        # load-bearing for the video path. Tried and reverted 2026-08-15.
+        #
+        # THE CRASH IT WAS MEANT TO FIX, and its ACTUAL cause. ComfyUI can die at the encode with
+        #     [aac] Input contains (near) NaN/+-Inf ... avcodec_send_frame() returned 22
+        # AFTER the chunk has fully sampled, so you pay the whole render for nothing.
+        # It is NOT the clip. Geometry, resolution and audio content were each ruled out by
+        # substitution; the test that found it was re-running a clip that had ALREADY upscaled
+        # cleanly earlier in the same session — it failed too. The cause is PROCESS STATE: after a
+        # run of MiniMax H3 renders, the LTX-2.5 path in the same long-lived ComfyUI starts
+        # decoding the audio latent to NaN. RESTART COMFYUI BETWEEN STACK SWITCHES and it does not
+        # happen. Upstream also has a real fix — scrub non-finite samples before the encode in
+        # comfy_api/latest/_input_impl/video_types.py — which is worth carrying if you hit this.
         # LAST, because it prunes: any node this drops must already have been patched above, and
         # anything it keeps still carries those edits.
         if a.cached_cond:
