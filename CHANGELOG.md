@@ -78,6 +78,10 @@ your encoder, regenerate with `--bootstrap-cond`.
 
 - `--setup` checks the mode you will run (`--model`), including the fusion nodes and the right
   LoRA.
+- Chunk sizing reserves the frames a chunk renders beyond its own (the 8n+1 rounding and refine's
+  pad), so `--budget` is no longer overrun by up to a quarter; a chunk that reads past the end of
+  the clip is padded; odd-sized sources are cropped one pixel to even dimensions in refine mode;
+  and `--budget 0` is refused instead of silently meaning "default".
 - `tools/check_release.py` re-derives both size tables from the code, and asserts every refine
   fix in the shipped files.
 

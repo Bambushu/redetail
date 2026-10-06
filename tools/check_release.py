@@ -127,6 +127,13 @@ ok("downloads the SAVE node's file, not the first video in history",
    "def wait(self, pid, save_node" in src and "comfy.wait(comfy.submit(pr), N_SAVE)" in src)
 ok("every chunk is checked for the target size", "Refusing to assemble a" in src)
 ok("guide strength refused in pixel mode", "--guide-strength is a refine-mode dial" in src)
+# Four findings from the 2.0 Codex review. Each one is a crash or a silent budget overrun.
+ok("chunk sizing reserves the frames a chunk renders beyond its own",
+   "_extra = 7 + (8 if refine else 0)" in src)
+ok("any chunk reading past the clip's end is padded, not just the last",
+   "_past_end = round(s * fps) + rlen > round(dur * fps)" in src)
+ok("odd refine sources are cropped to even dimensions for 4:2:0", "w // 2 * 2, h // 2 * 2" in src)
+ok("a zero or negative --budget is refused, not replaced", "--budget must be a positive" in src)
 # BEHAVIOURAL. The crf path moved between ComfyUI releases (format.codec... -> codec...), so the
 # walker is exercised against both published schema shapes plus one with no crf at all.
 _new = {"required": {"format": ["COMBO", {}], "codec": ["COMFY_DYNAMICCOMBO_V3", {"options": [

@@ -32,6 +32,9 @@ Refine stayed closer to the source, and flickered less, on all seven clips. The 
 are single runs: one 97-frame H3 clip on a 32GB RTX PRO 4500, and the 4K pass on an RTX 5090,
 which also needed 52 GB of system RAM (see [Memory](#picking-a-size)).
 
+The two 4K demos (renders, their sources and a 1:1-pixel comparison reel) are attached to the
+[v2.0 release](https://github.com/Bambushu/redetail/releases/tag/v2.0).
+
 **Refine** wherever a face, a product or the framing has to survive, and for anything going to 4K.
 **Pixel** for the most invented detail on soft AI footage with nothing to preserve, at less than
 half refine's render time.
@@ -176,7 +179,7 @@ What grows with length and size is **system RAM**. ComfyUI keeps the model weigh
 result as full float frames: about **33 MB per output frame-megapixel**. That 97-frame 4K pass
 peaked at **52 GB of RAM** with `--cached-cond`; with the text encoder also loaded, 105 frames at
 that size ran a 57 GB machine out of memory. `--budget` caps the frame-megapixels per chunk
-(refine default 500, about 60 frames at 4K). Lower it on a smaller machine, and use
+(refine default 500, about 44 frames per chunk at 4K once the padding is reserved). Lower it on a smaller machine, and use
 `--cached-cond` for anything at 4K.
 
 **Memory, pixel.** Keep `frames × (width × height ÷ 1,000,000)` under your card's budget. The

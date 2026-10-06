@@ -798,11 +798,22 @@ def main():
     # source as it is. The /64 source fit exists for the pixel graph's half-resolution reference,
     # and applying it here would only throw pixels away first (1664x928 -> 1600x896).
     fit, cw, ch = ("none", w, h) if refine else fit_source(w, h)
+    if refine and (w % 2 or h % 2):
+        # The chunks are re-encoded as 4:2:0 H.264, which needs even dimensions. One pixel row or
+        # column is the whole cost; the /64 fit above never has this problem.
+        fit, cw, ch = "crop", w // 2 * 2, h // 2 * 2
     vf = (f"scale={cw}:{ch}:flags=lanczos" if fit == "resize" else
           f"crop={cw}:{ch}" if fit == "crop" else "null")
     tw, th, aerr, serr = target_for(w, h, cw, ch, a.scale, GRID[a.model])
-    a.budget = a.budget or FMP_BUDGET[a.model]
-    max_sec = a.budget / (tw * th / 1e6) / fps
+    if a.budget is None:
+        a.budget = FMP_BUDGET[a.model]
+    if a.budget <= 0:
+        sys.exit("--budget must be a positive number of frame-megapixels.")
+    # The budget is what a chunk RENDERS, and a chunk renders more frames than it owns: up to 7
+    # more rounding to 8n+1, plus refine's 8-frame tail pad. Reserve that worst case up front, or
+    # a chunk sized to fit lands up to 15 frames over (24% over on a 58-frame 4K chunk).
+    _extra = 7 + (8 if refine else 0)
+    max_sec = max(9.0, a.budget / (tw * th / 1e6) - _extra) / fps
     segs = segments(scene_cuts(src), dur, max_sec, fps)
     src_frames = round(dur * fps)
 
@@ -810,7 +821,8 @@ def main():
     if fit == "resize":
         print(f"  source -> {cw}x{ch} (resized; exact aspect, no framing lost)")
     elif fit == "crop":
-        print(f"  source -> {cw}x{ch} (cropped {max(1-cw/w, 1-ch/h)*100:.1f}% to reach the /64 grid)")
+        print(f"  source -> {cw}x{ch} (cropped {max(1-cw/w, 1-ch/h)*100:.1f}% to reach "
+              f"{'even dimensions' if refine else 'the /64 grid'})")
     print(f"  target -> {tw}x{th}  ({tw/cw:.2f}x, {serr*100:+.1f}% off {a.scale}x, "
           f"aspect error {aerr*100:.2f}%)")
     print(f"  {len(segs)} chunk(s), {sum(L for _, _, L in segs)}/{src_frames} frames, "
@@ -839,7 +851,11 @@ def main():
             # detail ... pad the clip by 8 frames and trim." 8 more keeps the length 8n+1, and the
             # existing trim back to L below removes them.
             rlen += 8
-        pad = f",tpad=stop_mode=clone:stop_duration={rlen/fps:.3f}" if i == len(segs) - 1 else ""
+        # Any chunk whose read runs past the end of the clip holds its last frame, not just the
+        # final one: with refine's extra 8 frames, a short clip's earlier chunks can run out too.
+        _past_end = round(s * fps) + rlen > round(dur * fps)
+        pad = (f",tpad=stop_mode=clone:stop_duration={rlen/fps:.3f}"
+               if i == len(segs) - 1 or _past_end else "")
         cut = ["ffmpeg", "-y", "-v", "error", "-i", src]
         if not has_audio:
             cut += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
