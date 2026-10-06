@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
-"""ReDetail — generative video upscaling with the LTX-2.5 IC-LoRA Pixel Spatial Upscaler.
+"""ReDetail — generative video re-detailing and upscaling with LTX-2.5 IC-LoRAs.
 
-    python3 redetail.py clip.mp4 --scale 1.5
+    python3 redetail.py clip.mp4 --scale 1.5                  # refine, the default
+    python3 redetail.py clip.mp4 --scale 1.5 --model pixel    # the 1.1 behaviour
 
 Point it at any running ComfyUI (default http://127.0.0.1:8188). It works out the target
 resolution, splits the clip on its own cuts, renders each piece, reassembles, and puts the
 original audio back. One command, no browser automation, no manual graph surgery.
+
+TWO MODELS, ONE PIPELINE
+  refine  Lightricks' Refine-Details IC-LoRA on the tiled-fusion graph. It rebuilds the fine detail
+          a soft clip is missing and stays locked to the source: framing, colour, motion and faces.
+          1024x576 tiles are fused at every step, so memory follows the tile rather than the frame
+          and 4K fits a 32GB card.
+  pixel   The Pixel Spatial Upscaler, ReDetail 1.1's only model. It repaints harder and invents
+          more, including skin texture that was never there, so it is the wrong tool wherever a
+          face has to stay the same person.
 
 WHY A SCRIPT AND NOT JUST THE WORKFLOW: the .json in workflows/ is the whole render and you can
 drag it straight into ComfyUI. But a real clip needs more than one render — the dimensions have to
@@ -15,13 +25,14 @@ of sync with the audio. That arithmetic is what this script does for you.
 
 READ THIS BEFORE USING IT ON ANYTHING THAT MATTERS
 --------------------------------------------------
-This model SYNTHESIZES detail. It does not recover detail that was in the original. On faces it
+Pixel mode SYNTHESIZES detail. It does not recover detail that was in the original. On faces it
 will invent skin texture that was never there — measured on one persona, it consistently added
-freckles. Judge the result by comparing the FACE against your source, not by how sharp it looks.
-It is a creative step, not a restoration tool. Model licence: LTX-2-community-license.
+freckles. Refine mode keeps a face, but it cannot repair one: it rebuilds the detail of whatever
+face is already there. Either way, judge the result by comparing the FACE against your source, not
+by how sharp it looks. Model licence: LTX-2-community-license.
 
 REQUIREMENTS
-    ComfyUI with Lightricks/ComfyUI-LTXVideo, kornia==0.7.4, comfy-kitchen>=0.2.26
+    ComfyUI with Lightricks/ComfyUI-LTXVideo (24 Sep 2026 or later for refine), comfy-kitchen>=0.2.26
     ffmpeg + ffprobe on PATH
     Models: see README.md
 """
@@ -29,16 +40,36 @@ import argparse, json, os, re, subprocess, sys, time, urllib.parse, urllib.reque
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WF = os.path.join(HERE, "workflows", "ltx25_upscale_API.json")
+WF_REFINE = os.path.join(HERE, "workflows", "ltx25_refine_API.json")
 
-# Node ids in the shipped API workflow. They are stable because the file is shipped resolved.
+# Node ids in the shipped API workflows. They are stable because the files are shipped resolved,
+# and the two graphs share Lightricks' layout, so the common ones mean the same thing in both.
 N_FRAME, N_VIDEO, N_SAVE = "2004", "5001", "4852"
 N_REF_RESIZE, N_CANVAS = "5548:5026", "9002:3059"
+N_GUIDE_RESIZE, N_GUIDE, N_SAMPLER = "9002:9201", "9002:5012", "5516:9100"      # refine only
 
-# Output frame-megapixels per chunk == the VRAM dial. Measured on a 96GB card:
+# The pixel guide is HALF resolution and split into 2x2 latent patches, so its canvas must be /64.
+# The refine guide is the clip at FULL output resolution (downscale factor 1), and the model card
+# asks for /32 only. That finer grid is why refine lands on an exact 1.5x far more often.
+GRID = {"pixel": 64, "refine": 32}
+
+# SaveVideo's default is h264 at crf 23, which smooths exactly the fine texture these models add,
+# and every later encode inherits the loss. Newer ComfyUI exposes the encoder as nested options;
+# they are only sent when the server's SaveVideo actually declares a crf.
+SAVE_CRF = 12
+
+# Output frame-megapixels per chunk. In PIXEL mode it is the VRAM dial. Measured on a 96GB card:
 #   243f x 1.08MP -> 52GB | 243f x 2.43MP -> 65GB | 243f x 4.33MP -> 80.5GB
 # i.e. roughly 42.5GB fixed + 0.036GB per frame-megapixel. 850 is comfortable on 96GB; drop it
 # with --budget on a smaller card (24GB: try ~150, 48GB: try ~350) or if you hit an OOM.
-FMP_BUDGET = 850.0
+#
+# In REFINE mode VRAM follows the tile, and the budget bounds SYSTEM RAM instead: the graph holds
+# the clip lanczos'd to the output size (ComfyUI resizes it frame by frame through PIL, briefly
+# holding several float copies) and the decoded result. Measured on an RTX 5090 pod with 57GB of
+# RAM: 57 rendered frames at 2176x3904 peaked at 38.4GB, about 24GB of staged models plus ~0.03GB
+# per frame-megapixel, and 105 frames at that size was killed for running out of RAM. 500 keeps a
+# chunk near 15GB on top of the models.
+FMP_BUDGET = {"pixel": 850.0, "refine": 500.0}
 
 # No chunk shorter than this. Tiny chunks pay a full setup cost for a fraction of a second and
 # starve the model of temporal context — splitting at every detected cut once produced ten chunks
@@ -124,19 +155,20 @@ def fit_source(w, h, max_crop=0.03):
     return ("resize", best[1], best[2]) if best else ("crop", cw, ch)
 
 
-def solve_dims(w, h, scale):
-    """Nearest /64 target to the requested scale that also holds the source aspect.
+def solve_dims(w, h, scale, grid=64):
+    """Nearest on-grid target to the requested scale that also holds the source aspect.
 
     The target is NOT scale x source. Exact 1.5x of 1920x1088 is 2880x1632, and 1632 is not /64,
-    so that exact target is invalid and the answer is 2816x1600: 0.27% aspect error, invisible.
-    Plenty of common sizes have no exact 1.5x on the grid; 2x is exact far more often, because
-    doubling a /64 number stays /64. Aspect error is
+    so on the pixel grid that exact target is invalid and the answer is 2816x1600: 0.27% aspect
+    error, invisible. Plenty of common sizes have no exact 1.5x on the /64 grid; 2x is exact far
+    more often, because doubling a /64 number stays /64. The refine grid is /32 (see GRID), where
+    2880x1632 IS valid. Aspect error is
     weighted ~8x scale error because a stretched face is obvious and 1.47x instead of 1.50x is not.
     """
     ar, best = w / h, None
-    lo = max(64, int(scale * h * 0.85) // 64 * 64)
-    for th in range(lo, int(scale * h * 1.15) // 64 * 64 + 65, 64):
-        tw = max(64, round(th * ar / 64) * 64)
+    lo = max(grid, int(scale * h * 0.85) // grid * grid)
+    for th in range(lo, int(scale * h * 1.15) // grid * grid + grid + 1, grid):
+        tw = max(grid, round(th * ar / grid) * grid)
         aerr = abs((tw / th) / ar - 1)
         if aerr > 0.02:
             continue
@@ -145,12 +177,13 @@ def solve_dims(w, h, scale):
         if best is None or score < best[0]:                          # which costs unasked-for VRAM
             best = (score, tw, th, aerr, serr)
     if best is None:
-        sys.exit(f"No /64 target within 2% of aspect {ar:.4f} near {scale}x. Try another scale.")
+        sys.exit(f"No /{grid} target within 2% of aspect {ar:.4f} near {scale}x. "
+                 f"Try another scale.")
     return best[1], best[2], best[3], best[4]
 
 
 
-def target_for(orig_w, orig_h, fit_w, fit_h, scale):
+def target_for(orig_w, orig_h, fit_w, fit_h, scale, grid=64):
     """Output size = `scale` x the ORIGINAL clip, rendered at the FITTED source's aspect.
 
     TWO THINGS HAVE TO COME FROM DIFFERENT PLACES, which is why this is not just solve_dims().
@@ -165,7 +198,7 @@ def target_for(orig_w, orig_h, fit_w, fit_h, scale):
     the picture.
     """
     eff = (orig_h * scale) / fit_h
-    return solve_dims(fit_w, fit_h, eff)
+    return solve_dims(fit_w, fit_h, eff, grid)
 
 def scene_cuts(path, threshold=0.3):
     r = subprocess.run(["ffmpeg", "-v", "info", "-i", path, "-an", "-vf",
@@ -285,7 +318,14 @@ class Comfy:
         except urllib.error.HTTPError as e:
             sys.exit(f"ComfyUI rejected the job:\n{e.read().decode()[:1500]}")
 
-    def wait(self, pid, every=5):
+    def wait(self, pid, save_node, every=5):
+        """Block until pid finishes; return the file the SAVE node wrote, or None.
+
+        Ask for the save node by id. This used to return the first video in the history, and
+        newer ComfyUI (0.37 here) lists LoadVideo's INPUT clip as an output too, ahead of the
+        render: every run then "succeeded" by downloading the clip it had uploaded, at the
+        source size, which no frame-count gate can catch.
+        """
         while True:
             time.sleep(every)
             h = json.loads(urllib.request.urlopen(f"{self.url}/history/{pid}", timeout=30).read())
@@ -293,10 +333,11 @@ class Comfy:
                 st = h[pid].get("status", {})
                 if st.get("status_str") != "success":
                     return None
-                for out in h[pid].get("outputs", {}).values():
-                    for k in ("video", "videos", "gifs", "images"):
-                        if out.get(k):
-                            return out[k][0]
+                out = h[pid].get("outputs", {}).get(save_node, {})
+                for k in ("video", "videos", "gifs", "images"):
+                    for item in out.get(k) or []:
+                        if item.get("type", "output") == "output":
+                            return item
                 return None
 
     def status(self, pid, every=5):
@@ -312,6 +353,36 @@ class Comfy:
             h = json.loads(urllib.request.urlopen(f"{self.url}/history/{pid}", timeout=30).read())
             if pid in h:
                 return h[pid].get("status", {}).get("status_str", "unknown")
+
+    def save_options(self):
+        """SaveVideo inputs that set a crf on this server, or {} if it has no crf to set.
+
+        Newer ComfyUI declares the encoder as nested dynamic combos and reads them back from dotted
+        keys, but WHICH input holds the nesting has moved between releases: one put the codec under
+        `format` (`format.codec.encoding.crf`), the next made `codec` itself the combo
+        (`codec.encoding.crf`). Hardcoding either path sends keys the other silently ignores, so
+        the path is found by walking the schema the server publishes. Older servers declare no crf
+        anywhere, and nothing is sent to them.
+        """
+        try:
+            spec = json.loads(urllib.request.urlopen(f"{self.url}/object_info/SaveVideo",
+                                                     timeout=30).read())["SaveVideo"]["input"]
+        except Exception:
+            return {}
+
+        def walk(inputs, prefix):
+            for name, s in {**inputs.get("required", {}), **inputs.get("optional", {})}.items():
+                key = f"{prefix}{name}"
+                if name == "crf":
+                    return {key: SAVE_CRF}
+                if isinstance(s, list) and s and s[0] == "COMFY_DYNAMICCOMBO_V3":
+                    for opt in s[1].get("options", []):
+                        found = walk(opt.get("inputs", {}), f"{key}.")
+                        if found:
+                            return {key: opt["key"], **found}
+            return {}
+
+        return walk(spec, "")
 
     def download(self, item, dst):
         q = urllib.parse.urlencode({"filename": item["filename"],
@@ -340,12 +411,20 @@ NEEDED_FILES = [
      "Lightricks/LTX-2.5"),
     ("vae", "VAELoader", "vae_name", "ltx-2.5-audio-vae-bf16.safetensors", "0.4GB",
      "Lightricks/LTX-2.5"),
-    ("loras", "LoraLoaderModelOnly", "lora_name",
-     "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors", "0.3GB",
-     "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"),
 ]
+# The IC-LoRA is what makes each mode what it is; everything above is shared.
+LORAS = {
+    "pixel": ("loras", "LoraLoaderModelOnly", "lora_name",
+              "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors", "0.3GB",
+              "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"),
+    "refine": ("loras", "LoraLoaderModelOnly", "lora_name",
+               "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors", "1.3GB",
+               "Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details"),
+}
 NEEDED_NODES = ["LTXAddVideoICLoRAGuide", "LTXICLoRALoaderModelOnly", "EmptyLTXVLatentVideo",
                 "VAEDecodeTiled"]
+# Landed in ComfyUI-LTXVideo on 24 Sep 2026. An older pack has every node above and not these.
+REFINE_NODES = ["LTXVTiledFusionSampler", "LTXVGetTilingSizes"]
 # Blackwell is sm_120 / sm_100. int8_convrot needs those tensor layouts; on anything older the
 # weights do not load AT ALL, which is an architecture limit and not a VRAM one.
 BLACKWELL = ("5090", "5080", "5070", "RTX PRO 6000", "B200", "B300", "GB200")
@@ -365,8 +444,8 @@ def use_cached_cond(pr, name, out_node="4852"):
     Nodes are then pruned by REACHABILITY from the video output. Pruning by eye is what produced a
     400 the first time; walking the graph from its output cannot pick the wrong set.
     """
-    pr["5014:2483"] = {"class_type": "LoadConditioning", "inputs": {"name": f"{name}_pos"}}
-    pr["5014:2612"] = {"class_type": "LoadConditioning", "inputs": {"name": f"{name}_neg"}}
+    pr["5014:2483"] = {"class_type": "ReDetailLoadConditioning", "inputs": {"name": f"{name}_pos"}}
+    pr["5014:2612"] = {"class_type": "ReDetailLoadConditioning", "inputs": {"name": f"{name}_neg"}}
     if "9002:9005" in pr:
         pr["9002:9005"]["inputs"]["positive"] = ["5014:1241", 0]
         pr["9002:9005"]["inputs"]["negative"] = ["5014:1241", 1]
@@ -384,16 +463,29 @@ def use_cached_cond(pr, name, out_node="4852"):
     return pr
 
 
+def refine_prompts():
+    """The refine graph's two prompts, read from the shipped graph itself so a cache can never
+    drift from what the encoder path would actually encode."""
+    g = json.load(open(WF_REFINE))
+    return g["5508"]["inputs"]["value"], g["5509"]["inputs"]["value"]
+
+
 def bootstrap_cond(url, encoder, name, clip_device=None):
-    """Load the encoder once, encode the empty prompt, save it, unload. Run this a single time."""
+    """Load the encoder once, encode both modes' prompts, save them, unload. Run this a single time.
+
+    Pixel mode's prompt boxes are empty, so its pair is the empty string twice. Refine mode's are
+    NOT: they carry the model card's look prompts, so it gets a pair of its own, `<name>_refine_*`.
+    One encoder load writes all four files.
+    """
     if not encoder:
         print("--bootstrap-cond needs --encoder <filename> (the one time it IS loaded).")
         return False
     comfy = Comfy(url)
     oi = json.loads(urllib.request.urlopen(f"{url}/object_info", timeout=60).read())
-    if "SaveConditioning" not in oi:
-        print("SaveConditioning is missing. Copy the tools/comfyui_cond_cache/ DIRECTORY into "
-              "ComfyUI/custom_nodes/ and RESTART ComfyUI, then re-run.")
+    if "ReDetailSaveConditioning" not in oi:
+        print("ReDetailSaveConditioning is missing. Copy the tools/comfyui_cond_cache/ DIRECTORY "
+              "into ComfyUI/custom_nodes/ (replacing any older copy) and RESTART ComfyUI, then "
+              "re-run. ComfyUI's own SaveConditioning is a different node and will not do.")
         return False
     # A GGUF encoder needs CLIPLoaderGGUF; a safetensors one needs CLIPLoader. Pick by extension
     # rather than making the user say which, since the filename already states it.
@@ -407,23 +499,32 @@ def bootstrap_cond(url, encoder, name, clip_device=None):
         ins["device"] = clip_device
     pr = {"1": {"class_type": loader, "inputs": ins},
           "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 0]}},
-          "3": {"class_type": "SaveConditioning",
+          "3": {"class_type": "ReDetailSaveConditioning",
                 "inputs": {"conditioning": ["2", 0], "name": f"{name}_pos"}},
-          "4": {"class_type": "SaveConditioning",
+          "4": {"class_type": "ReDetailSaveConditioning",
                 "inputs": {"conditioning": ["2", 0], "name": f"{name}_neg"}}}
-    print(f"encoding the empty prompt with {encoder} (this is the only time it loads) ...")
+    _pos, _neg = refine_prompts()
+    for _i, (_text, _tag) in enumerate(((_pos, "refine_pos"), (_neg, "refine_neg"))):
+        pr[f"{5 + 2 * _i}"] = {"class_type": "CLIPTextEncode",
+                               "inputs": {"text": _text, "clip": ["1", 0]}}
+        pr[f"{6 + 2 * _i}"] = {"class_type": "ReDetailSaveConditioning",
+                               "inputs": {"conditioning": [f"{5 + 2 * _i}", 0],
+                                          "name": f"{name}_{_tag}"}}
+    print(f"encoding both modes' prompts with {encoder} (this is the only time it loads) ...")
     st = comfy.status(comfy.submit(pr))
     if st != "success":
         print(f"encode FAILED (status: {st}). Nothing was cached.\n"
               "Check ComfyUI's log — the usual cause is the encoder not loading: a GGUF encoder "
-              "needs ComfyUI-GGUF with the gemma4 arch patch, and int8_convrot needs Blackwell.")
+              "needs ComfyUI-GGUF with the gemma4 arch patch, and int8_convrot needs "
+              "comfy-kitchen>=0.2.26.")
         return False
-    print(f"saved '{name}_pos' and '{name}_neg' in ComfyUI/output/cond_cache/.\n"
+    print(f"saved '{name}_pos', '{name}_neg' (pixel) and '{name}_refine_pos', "
+          f"'{name}_refine_neg' (refine) in ComfyUI/output/cond_cache/.\n"
           f"From now on: --cached-cond {name}   (and drop --encoder)")
     return True
 
 
-def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
+def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None, model="refine"):
     """`--setup` must check the install the user is actually going to RUN.
 
     It used to take only the URL, so it always demanded the int8_convrot text encoder. A
@@ -471,12 +572,21 @@ def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
         say(False, f"could not read /object_info ({e})")
         return False
 
+    print(f"  ----  mode: {model}")
+    pack_ok = all(n in oi for n in NEEDED_NODES)
     for n in NEEDED_NODES:
         say(n in oi, f"node {n}",
-            "install github.com/Lightricks/ComfyUI-LTXVideo and RESTART ComfyUI. If it is already "
-            "installed, its import failed - that is only a WARNING in the boot log, so read the "
-            "log. Usual cause: kornia 0.8.x (pin kornia==0.7.4) or comfy-kitchen < 0.2.26, "
-            "installed into a DIFFERENT python than ComfyUI runs from.")
+            "install github.com/Lightricks/ComfyUI-LTXVideo, install its requirements.txt into "
+            "the python ComfyUI runs from, and RESTART ComfyUI. If it is already installed, its "
+            "import failed - that is only a WARNING in the boot log, so read the log. Usual "
+            "causes: requirements skipped (No module named 'colour'), comfy-kitchen < 0.2.26, or "
+            "on a pack older than 22 Sep 2026, kornia 0.8.x (those need kornia==0.7.4).")
+    if model == "refine":
+        for n in REFINE_NODES:
+            # With the pack loaded, a missing one of these is an OLD pack, not a broken install.
+            say(n in oi, f"node {n}",
+                "update ComfyUI-LTXVideo (refine mode needs 24 Sep 2026 or later) and restart"
+                if pack_ok else "fix the node pack above first")
 
     def enum_for(cls, field):
         try:
@@ -496,7 +606,7 @@ def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
     # Substitute the two files the low-spec path legitimately replaces, so the check matches the
     # command the user will actually run rather than the default int8 set.
     wanted = []
-    for folder, cls, field, fname, size, repo in NEEDED_FILES:
+    for folder, cls, field, fname, size, repo in NEEDED_FILES + [LORAS[model]]:
         if cached_cond and folder == "text_encoders":
             continue          # no encoder is loaded at all, so requiring one is just wrong
         if gguf and folder == "diffusion_models":
@@ -540,11 +650,11 @@ def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
     # evidence of an int8 run. Without this, the correct Mac setup gets told it is broken.
     using_int8 = (gguf is None) or (encoder is None and not cached_cond)
     if cached_cond:
-        say("LoadConditioning" in oi, f"cond cache node (for --cached-cond {cached_cond})",
+        say("ReDetailLoadConditioning" in oi, f"cond cache node (for --cached-cond {cached_cond})",
             "copy the tools/comfyui_cond_cache/ DIRECTORY into ComfyUI/custom_nodes/ and RESTART "
             "ComfyUI. The shipped .pt files live inside it, so copy the folder, not just the .py")
-        say(True, f"encoder will NOT be loaded — using cached '{cached_cond}_pos/_neg'",
-            "")
+        _cn = f"{cached_cond}_refine" if model == "refine" else cached_cond
+        say(True, f"encoder will NOT be loaded — using cached '{_cn}_pos/_neg'", "")
         if "mps" in gpu.lower() or "apple" in gpu.lower():
             # Found the hard way: everything sampled fine on an M5 and died on the last node.
             say(True, "Apple Silicon detected — see the MPS note below", "")
@@ -577,7 +687,8 @@ def doctor(url, gguf=None, encoder=None, clip_device=None, cached_cond=None):
     print("-" * 60)
     print("All checks passed. Try the smoke test:\n"
           "  ffmpeg -i yourclip.mp4 -frames:v 17 -c:a copy smoke.mp4\n"
-          "  python3 redetail.py smoke.mp4 --scale 1.5\n" if ok else
+          f"  python3 redetail.py smoke.mp4 --scale 1.5"
+          f"{' --model pixel' if model == 'pixel' else ''}\n" if ok else
           "Fix the FAIL lines above, then run --setup again.\n")
     return ok
 
@@ -592,12 +703,22 @@ def main():
                    help="1.0 re-detail at same size, 1.5 the sweet spot, 2.0 heaviest (default 1.5)")
     p.add_argument("--comfy", default="http://127.0.0.1:8188")
     p.add_argument("--out", default=None, help="output file (default <name>_redetail.mp4)")
-    p.add_argument("--budget", type=float, default=FMP_BUDGET,
-                   help="VRAM dial: output frame-megapixels per chunk. Lower it if you OOM.")
+    p.add_argument("--budget", type=float, default=None,
+                   help="output frame-megapixels per chunk (default 850 pixel, 500 refine). "
+                        "Pixel: the VRAM dial. Refine: the system-RAM dial, ~30MB per "
+                        "frame-megapixel on top of the loaded models. Lower it if you run out.")
     p.add_argument("--audio", choices=["original", "generated"], default="original",
                    help="'original' re-muxes your audio (default). The model regenerates a track "
                         "per chunk, which you do not want on finished material.")
     p.add_argument("--keep-chunks", action="store_true")
+    p.add_argument("--model", choices=["refine", "pixel"], default="refine",
+                   help="refine (default): Refine-Details on the tiled-fusion graph. Stays on the "
+                        "source, faces included, and reaches 4K on a 32GB card. pixel: the 1.1 "
+                        "Pixel Spatial Upscaler, which repaints harder and invents more.")
+    p.add_argument("--guide-strength", type=float, default=1.0,
+                   help="refine only: how hard the IC-LoRA guide holds to your clip (default 1.0, "
+                        "locked). Lower buys texture with fidelity: in one test 0.6 sharpened a "
+                        "face and drifted from it, and 0.4 swapped it for a different person.")
     # ---- low-spec / non-Blackwell -----------------------------------------------------------
     # NOT a Blackwell requirement — that claim was retracted, see doctor(). int8_convrot runs on
     # Ampere and Ada; a GGUF transformer is simply smaller and faster, and is the fallback if the
@@ -630,8 +751,8 @@ def main():
                         "non-Blackwell encoder is 26GB bf16, and dropping it frees that memory "
                         "for the transformer.")
     p.add_argument("--bootstrap-cond", nargs="?", const="redetail", default=None, metavar="NAME",
-                   help="load the encoder ONCE, encode the empty prompt, save it under NAME, and "
-                        "exit. Needs --encoder. Run this a single time, then use --cached-cond.")
+                   help="load the encoder ONCE, encode both modes' prompts, save them under NAME, "
+                        "and exit. Needs --encoder. Run this a single time, then use --cached-cond.")
     a = p.parse_args()
 
     if a.bootstrap_cond:
@@ -639,9 +760,12 @@ def main():
                                      a.clip_device) else 1)
     if a.setup:
         sys.exit(0 if doctor(a.comfy.rstrip("/"), a.gguf, a.encoder, a.clip_device,
-                             a.cached_cond) else 1)
+                             a.cached_cond, a.model) else 1)
     if not a.input:
         sys.exit("Give me a video, or run with --setup to check your install.")
+    refine = a.model == "refine"
+    if not refine and a.guide_strength != 1.0:
+        sys.exit("--guide-strength is a refine-mode dial; pixel mode has no fidelity control.")
     src = os.path.abspath(a.input)
     if not os.path.exists(src):
         sys.exit(f"No such file: {src}")
@@ -670,14 +794,19 @@ def main():
     # main input for a generative re-detailer — are usually silent, so this is the common case.
     has_audio = bool(run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
                           "stream=index", "-of", "csv=p=0", src]).strip())
-    fit, cw, ch = fit_source(w, h)
-    vf = f"scale={cw}:{ch}:flags=lanczos" if fit == "resize" else f"crop={cw}:{ch}"
-    tw, th, aerr, serr = target_for(w, h, cw, ch, a.scale)
+    # Refine resizes the clip to the canvas itself (lanczos, inside the graph), so it takes the
+    # source as it is. The /64 source fit exists for the pixel graph's half-resolution reference,
+    # and applying it here would only throw pixels away first (1664x928 -> 1600x896).
+    fit, cw, ch = ("none", w, h) if refine else fit_source(w, h)
+    vf = (f"scale={cw}:{ch}:flags=lanczos" if fit == "resize" else
+          f"crop={cw}:{ch}" if fit == "crop" else "null")
+    tw, th, aerr, serr = target_for(w, h, cw, ch, a.scale, GRID[a.model])
+    a.budget = a.budget or FMP_BUDGET[a.model]
     max_sec = a.budget / (tw * th / 1e6) / fps
     segs = segments(scene_cuts(src), dur, max_sec, fps)
     src_frames = round(dur * fps)
 
-    print(f"\n  {os.path.basename(src)}  {w}x{h}  {dur:.1f}s  {fps:g}fps")
+    print(f"\n  {os.path.basename(src)}  {w}x{h}  {dur:.1f}s  {fps:g}fps   [{a.model}]")
     if fit == "resize":
         print(f"  source -> {cw}x{ch} (resized; exact aspect, no framing lost)")
     elif fit == "crop":
@@ -687,12 +816,13 @@ def main():
     print(f"  {len(segs)} chunk(s), {sum(L for _, _, L in segs)}/{src_frames} frames, "
           f"cap {max_sec:.1f}s at {a.budget:g} frame-MP\n")
 
-    base = json.load(open(WF))
+    base = json.load(open(WF_REFINE if refine else WF))
     comfy = Comfy(a.comfy)
+    save_opts = comfy.save_options()
     parts = []
     for i, (s, _e, L) in enumerate(segs):
-        tag = f"rd_{abs(hash((src, s, L, tw, th))) % 10**8:08d}_{i:03d}"
-        seg, frm = mine(f"{work}/{tag}.mp4"), mine(f"{work}/{tag}.png")
+        tag = f"rd_{abs(hash((src, s, L, tw, th, a.model, a.guide_strength))) % 10**8:08d}_{i:03d}"
+        seg = mine(f"{work}/{tag}.mp4")
         # -ss AFTER -i and NO -to. As an INPUT option -ss is a keyframe seek: it silently starts
         # early and runs long (a 4.00s request came back 7.92s). -to is an exclusive end on a
         # float timestamp and can clip the last frame. -frames:v alone pins the count. Seeking
@@ -704,6 +834,11 @@ def main():
         # chunk COUNT to satisfy 8n+1 instead is arithmetically valid but turns a comfortable
         # one-chunk render into eight nine-frame ones.
         rlen = render_len(L)
+        if refine:
+            # The model card: "the last one or two frames of any LTX generation lose about 10%
+            # detail ... pad the clip by 8 frames and trim." 8 more keeps the length 8n+1, and the
+            # existing trim back to L below removes them.
+            rlen += 8
         pad = f",tpad=stop_mode=clone:stop_duration={rlen/fps:.3f}" if i == len(segs) - 1 else ""
         cut = ["ffmpeg", "-y", "-v", "error", "-i", src]
         if not has_audio:
@@ -718,14 +853,26 @@ def main():
         if got != rlen:
             sys.exit(f"Chunk {i} came out {got} frames instead of {rlen}. Refusing to continue — "
                      f"the result would be out of sync with the audio.")
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", seg, "-frames:v", "1", "-update", "1",
-                        frm], check=True)
-
         pr = json.loads(json.dumps(base))
         pr[N_VIDEO]["inputs"]["file"] = comfy.upload(seg)
-        pr[N_FRAME]["inputs"]["image"] = comfy.upload(frm)   # ships EMPTY; an empty filename makes
-        pr[N_SAVE]["inputs"]["filename_prefix"] = tag        # ComfyUI open the input DIRECTORY
-        pr[N_REF_RESIZE]["inputs"]["resize_type.shorter_size"] = min(cw, ch)
+        pr[N_SAVE]["inputs"]["filename_prefix"] = tag
+        pr[N_SAVE]["inputs"].update(save_opts)
+        if refine:
+            # The guide is the clip lanczos'd to the canvas. Like the canvas below, its size is
+            # LINKED to Get Tiling Sizes' presets in the stock graph; literal ints put it on the
+            # solved target instead.
+            pr[N_GUIDE_RESIZE]["inputs"]["width"], pr[N_GUIDE_RESIZE]["inputs"]["height"] = tw, th
+            # The shipped graph pins the trained 1024x576 tile. A portrait canvas gets the other
+            # trained shape, 576x1024.
+            pr[N_SAMPLER]["inputs"]["tile_width"], pr[N_SAMPLER]["inputs"]["tile_height"] = (
+                (576, 1024) if th > tw else (1024, 576))
+            pr[N_GUIDE]["inputs"]["strength"] = a.guide_strength
+        else:
+            frm = mine(f"{work}/{tag}.png")
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", seg, "-frames:v", "1",
+                            "-update", "1", frm], check=True)
+            pr[N_FRAME]["inputs"]["image"] = comfy.upload(frm)   # ships EMPTY; an empty filename
+            pr[N_REF_RESIZE]["inputs"]["resize_type.shorter_size"] = min(cw, ch)  # opens the DIR
         # THE CANVAS. In the stock graph these are LINKED from GetImageSize on the resized source,
         # so it renders 1:1 no matter what scale you asked for — the single most confusing failure
         # this tool has. Literal ints sever that link.
@@ -765,7 +912,8 @@ def main():
         # LAST, because it prunes: any node this drops must already have been patched above, and
         # anything it keeps still carries those edits.
         if a.cached_cond:
-            pr = use_cached_cond(pr, a.cached_cond, N_SAVE)
+            # Refine's prompt boxes are not empty, so it reads its own pair (--bootstrap-cond).
+            pr = use_cached_cond(pr, a.cached_cond + ("_refine" if refine else ""), N_SAVE)
         if a.decode_tile or a.decode_temporal:
             _d = pr.get("5518:5538", {}).get("inputs", {})
             if a.decode_tile:
@@ -779,11 +927,20 @@ def main():
 
         t0 = time.time()
         print(f"  chunk {i+1}/{len(segs)}  {L} frames ...", end="", flush=True)
-        item = comfy.wait(comfy.submit(pr))
+        item = comfy.wait(comfy.submit(pr), N_SAVE)
         if not item:
             sys.exit(f"\nChunk {i} failed. Check the ComfyUI console for the error.")
         dst = mine(f"{work}/out_{tag}.mp4")
         mb = comfy.download(item, dst) / 1e6
+        # SIZE GATE. Frame count alone passed two different wrong files: a render whose canvas
+        # link survived (1:1 at the source size) and, on newer ComfyUI, the uploaded INPUT clip
+        # itself. Both are the wrong resolution, and both decode and play perfectly.
+        _w, _h = (int(v) for v in run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                       "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                                       dst]).strip().split(",")[:2])
+        if (_w, _h) != (tw, th):
+            sys.exit(f"\nChunk {i} came back {_w}x{_h}, expected {tw}x{th}. Refusing to assemble a "
+                     f"result at the wrong size.")
         # A SHORT return is unrecoverable: ffmpeg cannot invent the missing frames, and -frames:v
         # would silently accept the shortfall. Only an EXCESS is trimmable.
         got_out = nframes(dst)
@@ -890,8 +1047,9 @@ def main():
             os.rmdir(work)
 
     print(f"\n  -> {out}  ({os.path.getsize(out)/1e6:.1f}MB, {tw}x{th})")
-    print("     Compare a FACE against your source before you ship it: this model invents "
-          "skin detail.\n")
+    print("     Compare a FACE against your source before you ship it: "
+          + ("refine keeps the face it is given, including a malformed one.\n" if refine else
+             "this model invents skin detail.\n"))
 
 
 if __name__ == "__main__":

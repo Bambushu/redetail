@@ -1,5 +1,86 @@
 # Changelog
 
+## 2.0
+
+A second model, now the default, and two fixes for current ComfyUI that 1.x CLI users should not
+skip.
+
+### New: refine mode, the default
+
+Lightricks' **Refine-Details** IC-LoRA on their tiled-fusion upscale graph. It rebuilds the fine
+detail a soft clip is missing and leaves the rest where it was: framing, colour, motion and the
+face. It works in 1024x576 tiles fused at every denoising step, so VRAM follows the tile rather
+than the frame, and 4K fits a 32GB card.
+
+Measured on the seven MiniMax H3 demo clips (640x384 upscaled 2x), against 1.1's pixel renders
+of the same clips. Detail and flicker are ratios against a lanczos upscale:
+
+| | **refine** | **pixel** |
+|---|---|---|
+| detail added | 1.4-2.4x | 2.3-3.8x |
+| fidelity to the source | **31.8-38.9 dB, SSIM 0.92-0.98** | 24.2-31.3 dB, SSIM 0.73-0.91 |
+| frame-to-frame flicker | **1.4-2.7x** | 2.2-5.1x |
+| render time (97 frames, 768x1376 to 1216x2112, 32GB card) | 526 s | **206 s** |
+| peak VRAM (same run) | 28.2 GB | 31.9 GB |
+| 4K (97 frames to 2176x3904, RTX 5090) | **one pass: 14 min, 28.4 GB VRAM** | VRAM grows with frames x pixels |
+
+Refine stayed closer to the source and flickered less on all seven.
+
+- `workflows/ReDetail_LTX25_refine.json`, built by `build_refine_workflow.py` from Lightricks'
+  `LTX-2.5_V2V_TiledFusion_Upscale.json`. The stock graph derives its tile from the source, and
+  any source within 200px of a preset keeps its own size: a 768x1376 clip became ONE tile 1.8x
+  the area the LoRA trained on. The tile is pinned to the trained 1024x576. Its two prompt-
+  enhancer branches are disconnected, for the same reason 1.1 disconnected the pixel graph's, and
+  its Missing Models panel points at the int8 files instead of 68GB of bf16.
+- `redetail.py --model refine` (the default): exact scales on refine's /32 grid (1920x1088 at
+  1.5x is now exactly 2880x1632), the card's 8-frame tail pad, the tile turned for portrait
+  clips, and `--guide-strength`, the fidelity dial pixel mode never had.
+- Cached conditioning for refine's prompts: `redetail_refine_pos/neg.pt`. `--cached-cond` now
+  works in both modes.
+- **Pixel mode is unchanged** and one flag away: `--model pixel`, `ReDetail_LTX25_upscale.json`.
+
+### Fixed: the CLI handed back your input instead of the render
+
+On current ComfyUI (seen on 0.37.2), `LoadVideo` reports the clip it loaded as an output, ahead of
+the render, and 1.x downloaded the first video it found in the job's history. Every run
+"succeeded" and returned the clip it had uploaded, re-encoded at the source size. Frame counts
+matched, so nothing caught it. The CLI now asks for the save node's file by id, and refuses any
+chunk that comes back at the wrong size.
+
+### Fixed: `--bootstrap-cond` on current ComfyUI
+
+ComfyUI now ships a core node called `SaveConditioning`, and it shadows this project's node of the
+same name. ReDetail's cache nodes are now also registered as `ReDetailSaveConditioning` and
+`ReDetailLoadConditioning`, which the CLI uses. **Copy the updated `tools/comfyui_cond_cache/`
+folder over your old one** and restart. The old names still load the 1.x Mac workflow.
+
+### Changed: the kornia pin is gone
+
+1.x pinned `kornia==0.7.4` because ComfyUI-LTXVideo imported a function kornia 0.8 removed, and
+that pin broke other node packs. The pack stopped importing it on 22 September 2026. Verified: the
+current pack loads cleanly on kornia 0.8.3. Keep the pin only on an older pack.
+
+### Changed: SaveVideo quality
+
+The CLI asks SaveVideo for crf 12 instead of its default 23, which smooths exactly the texture
+these models add. The setting's location moved between ComfyUI releases, so it is read from the
+server's own schema, and nothing is sent to a server that has none.
+
+### Measured: the shipped pixel conditioning against the int8 encoder
+
+1.1 said the Q5_K_M tensors were "expected to be numerically close" to the int8 encoder's. They
+are close, not identical: cosine similarity 0.934 on the tensor, and 48.3 dB PSNR between a
+17-frame render using them and the same render through the int8 encoder. A cache is bit-identical
+to the encoder that made it (PSNR inf, frame hashes equal, both modes). For exact parity with
+your encoder, regenerate with `--bootstrap-cond`.
+
+### Also
+
+- `--setup` checks the mode you will run (`--model`), including the fusion nodes and the right
+  LoRA.
+- `tools/check_release.py` re-derives both size tables from the code, and asserts every refine
+  fix in the shipped files.
+
 ## 1.1
 
 Two fixes you should not skip, and two additions.

@@ -181,7 +181,7 @@ def pair_png(left, right, ltitle, lsub, rtitle, rsub, caption, dst, settings=Non
     label_bar(d, PAD, head - 58, w, ltitle, lsub, DIM)
     label_bar(d, PAD + w + GAP, head - 58, w, rtitle, rsub, FG)
     d.rectangle([PAD + w + GAP - 1, head - 1, PAD + w * 2 + GAP, head + h], outline=ACCENT, width=2)
-    d.text((PAD, head + h + 16), "100% pixel crop. Both halves identical size — source Lanczos-"
+    d.text((PAD, head + h + 16), "100% pixel crop. Both halves identical size, the source Lanczos-"
            "resampled to match. No sharpening applied to either.", font=font(REG, 14), fill=DIM)
     if settings:
         settings_box(d, PAD, head + h + 44, W - PAD * 2, settings)
@@ -201,7 +201,7 @@ def title_card(text, sub, w, h, dst):
     return img
 
 
-def filmstrip(src, up, sw, sh_, t, box, caption, dst, n=4, step=2):
+def filmstrip(src, up, sw, sh_, t, box, caption, dst, n=4, step=2, rname="REDETAIL"):
     """N consecutive frames of the same crop: Lanczos on top, ReDetail below.
 
     This is the only honest way to show a generative upscaler on fast motion. A single frame just
@@ -244,7 +244,7 @@ def filmstrip(src, up, sw, sh_, t, box, caption, dst, n=4, step=2):
            fill=DIM)
     d.text((PAD, 60), f"{n} frames, {step} apart. Same crop, same output size.",
            font=font(BOLD, 16), fill=FG)
-    for r, (nm, col) in enumerate((("LANCZOS", DIM), ("REDETAIL", FG))):
+    for r, (nm, col) in enumerate((("LANCZOS", DIM), (rname, FG))):
         d.text((PAD, head + r * (ch + lab + g) + 2), nm, font=font(BLACK, 19), fill=col)
     d.text((PAD, H - foot + 14), "Watch whether the invented texture stays put across the row. "
            "Detail that changes every frame is the failure mode on motion, not softness.",
@@ -728,18 +728,315 @@ def cover():
     return p
 
 
+# ------------------------------------------------------------------------------------------------
+# 2.0: REFINE MODE. The same seven sources at the same 2.0x output size, cropped at the same region
+# picked on the SOURCE. Three columns now, because the 2.0 question is not "is it sharper than
+# Lanczos" but "which model": pixel invents more, refine keeps what is there.
+# ------------------------------------------------------------------------------------------------
+REFINE = f"{REND}/refine_2.0x"
+REFINE_SETTINGS = [
+    ("MODEL", "LTX-2.5 22B distilled, int8_convrot"),
+    ("IC-LORA", "refine-details-1.0 @ 1.0, guide 1.0"),
+    ("SAMPLER", "8 steps, euler, CFG 1.0, 1024x576 tiles fused every step"),
+]
+# Face crops for the portraits, as a CENTRE in 1280x768 output pixels. Placed by looking at the
+# SOURCE frame only. The source-scored ROI favours hair, and on a face the question this release
+# answers is whether it is still the same face.
+FACE = {"portrait_15st": (620, 380), "portrait_10st": (920, 380)}
+
+
+def triple_png(panels, caption, dst, settings=None):
+    """Three same-size crops in a row, (image, title, subtitle) each, on the dark card. The last
+    panel is the subject and gets the outline. Also writes an unlabelled `_clean` twin."""
+    w, h = panels[0][0].size
+    W = PAD * 2 + w * 3 + GAP * 2
+    head = 132
+    foot = 58 if not settings else 58 + 26 + len(settings) * 19 + 8 + 14
+    H = head + h + foot
+    card = Image.new("RGB", (W, H), BG)
+    for i, (im, _, _) in enumerate(panels):
+        card.paste(im, (PAD + i * (w + GAP), head))
+    clean = card.copy()
+    d = ImageDraw.Draw(card)
+    ft = font(BLACK, 30)
+    d.text((PAD, 22), "ReDetail", font=ft, fill=ACCENT)
+    d.text((PAD + d.textlength("ReDetail", font=ft) + 22, 29), caption, font=font(REG, 17),
+           fill=DIM)
+    for i, (_, title, sub) in enumerate(panels):
+        label_bar(d, PAD + i * (w + GAP), head - 58, w, title, sub,
+                  FG if i == len(panels) - 1 else DIM)
+    xl = PAD + (len(panels) - 1) * (w + GAP)
+    d.rectangle([xl - 1, head - 1, xl + w, head + h], outline=ACCENT, width=2)
+    d.text((PAD, head + h + 16), "100% pixel crop, the same region in all three, all at the same "
+           "output size. Source Lanczos-resampled to match. No sharpening on any. Pixel panel: the "
+           "1.1 release render of the same source.", font=font(REG, 14), fill=DIM)
+    if settings:
+        settings_box(d, PAD, head + h + 44, W - PAD * 2, settings, title="REFINE SETTINGS")
+    card.save(dst)
+    clean.save(dst.replace(".png", "_clean.png"))
+    return card
+
+
+def build_v2(name, steps, t, desc, stem, do_video):
+    src = f"{REND}/{stem}.mp4"
+    pix = f"{REND}/up_2.0x/{stem}_2.0x.mp4"
+    ref = f"{REFINE}/{stem}_refine_2.0x.mp4"
+    tag = f"{name}_{steps}st"
+    if not all(os.path.exists(p) for p in (src, pix, ref)):
+        print(f"  skip {tag}: missing input")
+        return []
+    sw, sh_ = 1280, 768
+    tmp = {k: f"{OUT}/.{tag}_v2_{k}.png" for k in ("src", "pix", "ref", "lz")}
+    grab(src, t, tmp["src"])
+    grab(pix, t, tmp["pix"])
+    grab(ref, t, tmp["ref"])
+    lanczos(tmp["src"], sw, sh_, tmp["lz"])
+    nf = sh_out("ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", src) or "?"
+    gen = f"MiniMax H3 t2v, 640x384, {nf}f @24fps, {steps} steps" + (
+        ", Spectrum" if "_spec" in stem else "")
+    rows = [("SOURCE", gen)] + REFINE_SETTINGS + [
+        ("OUTPUT", f"{sw}x{sh_}  (2.0x), single chunk, original audio re-muxed")]
+    cw, ch = CROP
+    boxes = {"": pick_roi(Image.open(tmp["src"]), sw, sh_, cw, ch)}
+    if FACE.get(tag):
+        cx, cy = FACE[tag]
+        boxes["_face"] = (cx - cw // 2, cy - ch // 2)
+    made = []
+    for suffix, (x, y) in boxes.items():
+        x, y = max(0, min(x, sw - cw)), max(0, min(y, sh_ - ch))
+        box = (x, y, x + cw, y + ch)
+        crops = [Image.open(tmp[k]).crop(box) for k in ("lz", "pix", "ref")]
+        for k, c in zip("LPR", crops):
+            c.save(f"{OUT}/.raw_{tag}{suffix}_v2_{k}.png")
+        dst = f"{OUT}/crop3_{tag}{suffix}_2.0x.png"
+        triple_png([(crops[0], "LANCZOS", f"640x384 resampled to {sw}x{sh_}"),
+                    (crops[1], "PIXEL", "the 1.x model: repaints"),
+                    (crops[2], "REFINE", "2.0 default: rebuilds")],
+                   f"{desc} · {steps} steps · 2.0x", dst, settings=rows)
+        made.append(dst)
+        print(f"  crop3_{tag}{suffix}_2.0x.png  roi=({x},{y})")
+        if name in MOTION and not suffix:
+            fdst = f"{OUT}/strip_{tag}_refine_2.0x.png"
+            filmstrip(src, ref, sw, sh_, t, box, f"{desc} · refine · 2.0x", fdst, rname="REFINE")
+            made.append(fdst)
+            print(f"  strip_{tag}_refine_2.0x.png")
+        if do_video:
+            v = f"{OUT}/crop3_{tag}{suffix}_2.0x.mp4"
+            lab = (lambda txt: f"drawtext=fontfile={BOLD}:text='{txt}':x=14:y=14:fontsize=24:"
+                               f"fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=8")
+            sh("ffmpeg", "-y", "-v", "error", "-i", src, "-i", pix, "-i", ref, "-filter_complex",
+               f"[0:v]scale={sw}:{sh_}:flags=lanczos,crop={cw}:{ch}:{x}:{y},{lab('LANCZOS')}[a];"
+               f"[1:v]crop={cw}:{ch}:{x}:{y},{lab('PIXEL')}[b];"
+               f"[2:v]crop={cw}:{ch}:{x}:{y},{lab('REFINE')}[c];[a][b][c]hstack=inputs=3",
+               "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-an", v)
+            made.append(v)
+            print(f"  crop3_{tag}{suffix}_2.0x.mp4")
+    for p in tmp.values():
+        os.remove(p)
+    return made
+
+
+def cover_v2():
+    """2x2 cover for the 2.0 page: each tile half Lanczos, half refine, from the raw crops."""
+    caps = {"forest": "ferns, backlit", "portrait": "skin + hair", "rain": "rain on glass",
+            "rust": "rusted metal", "action": "motocross, dirt"}
+    tiles = []
+    for n, st, _ in HERO:
+        tag = f"{n}_{st}st"
+        L, R = f"{OUT}/.raw_{tag}_v2_L.png", f"{OUT}/.raw_{tag}_v2_R.png"
+        if not (os.path.exists(L) and os.path.exists(R)):
+            continue
+        l, r = Image.open(L), Image.open(R)
+        w, h = l.size
+        t = Image.new("RGB", (w, h))
+        t.paste(l.crop((0, 0, w // 2, h)), (0, 0))
+        t.paste(r.crop((w // 2, 0, w, h)), (w // 2, 0))
+        ImageDraw.Draw(t).line([(w // 2, 0), (w // 2, h)], fill=ACCENT, width=2)
+        tiles.append((t, f"{caps.get(n, n)} · {st} steps"))
+    if len(tiles) < 4:
+        print("  cover_v2: need 4 raw crop pairs, have", len(tiles))
+        return None
+    tw, th = tiles[0][0].size
+    head, capH, G = 132, 34, 16
+    W, H = tw * 2 + G * 3, head + (th + capH) * 2 + G * 3
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    for i, (t, cap) in enumerate(tiles):
+        x = G + (i % 2) * (tw + G)
+        y = head + (i // 2) * (th + capH + G)
+        img.paste(t, (x, y))
+        d.rectangle([x - 1, y - 1, x + tw, y + th], outline=(48, 48, 52))
+        d.text((x, y + th + 8), cap, font=font(REG, 17), fill=DIM)
+    ft = font(BLACK, 48)
+    d.text((G, 16), "ReDetail 2.0", font=ft, fill=ACCENT)
+    tagx = G + d.textlength("ReDetail 2.0", font=ft) + 22
+    fit(d, "refine: detail back, everything else kept", REG, 24, W - tagx - G, (tagx, 34), DIM)
+    fit(d, "LTX-2.5 Refine-Details IC-LoRA, tiled. 4K on a 32GB card.", REG, 19, W - G * 2,
+        (G, 72), DIM)
+    fit(d, "each tile: LEFT half Lanczos  ·  RIGHT half refine  ·  identical output size, "
+        "2.0x, 100% pixels", BOLD, 17, W - G * 2, (G, 100), FG)
+    p = f"{OUT}/cover_v2.png"
+    img.save(p)
+    print(f"  cover_v2.png {W}x{H}")
+    return p
+
+
+# ------------------------------------------------------------------------------------------------
+# 2.0 4K SHOWCASE. A ~1080p generated clip refined to 3840 wide. Two regions per clip, picked on
+# the SOURCE: a 100% still card each, plus a 1920x1080 window at 1:1 pixels of the 4K frame with a
+# Lanczos -> refine wipe, which is what survives being watched on a 1080p screen.
+# ------------------------------------------------------------------------------------------------
+DEMO4K = os.path.expanduser("~/h3-demos/redetail-v2/demo4k")
+SHOW4K = [  # (name, source, refine 4K, still time, caption)
+    ("forest", f"{DEMO4K}/forest_river_97f.mp4", f"{DEMO4K}/forest_river_refine_3840x2144.mp4",
+     2.0, "Forest river, backlit mist"),
+    ("band", f"{DEMO4K}/band_wheatfield_97f.mp4", f"{DEMO4K}/band_wheatfield_refine_3840x2144.mp4",
+     2.0, "Band in a wheat field"),
+]
+
+
+def rois(src_img, ow, oh, cw, ch, n=2):
+    """The n best source-scored regions that do not overlap, in output coordinates."""
+    out, img = [], src_img.copy()
+    sw, sh_ = img.size
+    for _ in range(n):
+        x, y = pick_roi(img, ow, oh, cw, ch)
+        x, y = max(0, min(x, ow - cw)), max(0, min(y, oh - ch))
+        out.append((x, y))
+        # Blank the chosen area on the scoring copy so the next pick lands somewhere else.
+        bx, by = int(x * sw / ow), int(y * sh_ / oh)
+        ImageDraw.Draw(img).rectangle([bx, by, bx + int(cw * sw / ow), by + int(ch * sh_ / oh)],
+                                      fill=(128, 128, 128))
+    return out
+
+
+def build_4k(name, src, ref, t, desc, do_video):
+    if not (os.path.exists(src) and os.path.exists(ref)):
+        print(f"  skip {name}: missing input")
+        return []
+    sw, sh_ = (int(v) for v in sh_out("ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=width,height", "-of", "csv=p=0", src).split(","))
+    ow, oh = (int(v) for v in sh_out("ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=width,height", "-of", "csv=p=0", ref).split(","))
+    s_png, r_png, l_png = (f"{OUT}/.4k_{name}_{k}.png" for k in ("src", "ref", "lz"))
+    grab(src, t, s_png)
+    grab(ref, t, r_png)
+    lanczos(s_png, ow, oh, l_png)
+    rows = [("SOURCE", f"generated clip, {sw}x{sh_}, 97f @24fps")] + REFINE_SETTINGS + [
+        ("OUTPUT", f"{ow}x{oh}  ({ow / sw:.2f}x), one pass, redetail.py --cached-cond")]
+    made = []
+    for i, (x, y) in enumerate(rois(Image.open(s_png), ow, oh, 960, 640), 1):
+        box = (x, y, x + 960, y + 640)
+        Image.open(l_png).crop(box).save(f"{OUT}/.raw4k_{name}_{i}_L.png")
+        Image.open(r_png).crop(box).save(f"{OUT}/.raw4k_{name}_{i}_R.png")
+        dst = f"{OUT}/crop4k_{name}_{i}.png"
+        pair_png(Image.open(l_png).crop(box), Image.open(r_png).crop(box),
+                 "LANCZOS", f"{sw}x{sh_} resampled to {ow}x{oh}",
+                 "REFINE", f"{ow}x{oh} generated",
+                 f"{desc} · 4K · region {i}", dst, settings=rows)
+        made.append(dst)
+        print(f"  crop4k_{name}_{i}.png  roi=({x},{y})")
+        if do_video:
+            # 1:1 pixels of the 4K frame, centred on the same region, 1920x1080.
+            cx, cy = x + 480, y + 320
+            bx, by = max(0, min(cx - 960, ow - 1920)), max(0, min(cy - 540, oh - 1080))
+            v = f"{OUT}/wipe4k_{name}_{i}.mp4"
+            crop_wipe_segment(src, ref, ow, oh, (bx, by, 1920, 1080), 1, 0.0, 4.0,
+                              # No colon: drawtext reads one as an option separator even inside
+                              # quotes, so "1:1" breaks the whole filtergraph.
+                              f"{desc.upper()}  ·  4K  ·  100% PIXELS", v)
+            made.append(v)
+            print(f"  wipe4k_{name}_{i}.mp4  window=({bx},{by})")
+    for p_ in (s_png, r_png, l_png):
+        os.remove(p_)
+    return made
+
+
+def cover_4k():
+    """2x2 cover from the 4K crops: each tile half Lanczos, half refine, 100% of the 4K frame."""
+    caps = {"forest": "forest river", "band": "band in a wheat field"}
+    tiles = []
+    for name, *_ in SHOW4K:
+        for i in (1, 2):
+            L, R = f"{OUT}/.raw4k_{name}_{i}_L.png", f"{OUT}/.raw4k_{name}_{i}_R.png"
+            if not (os.path.exists(L) and os.path.exists(R)):
+                continue
+            l, r = Image.open(L), Image.open(R)
+            w, h = l.size
+            t = Image.new("RGB", (w, h))
+            t.paste(l.crop((0, 0, w // 2, h)), (0, 0))
+            t.paste(r.crop((w // 2, 0, w, h)), (w // 2, 0))
+            ImageDraw.Draw(t).line([(w // 2, 0), (w // 2, h)], fill=ACCENT, width=3)
+            tiles.append((t, f"{caps.get(name, name)} · region {i}"))
+    if len(tiles) < 4:
+        print("  cover_4k: need 4 raw 4K crop pairs, have", len(tiles))
+        return None
+    tw, th = tiles[0][0].size
+    head, capH, G = 150, 38, 18
+    W, H = tw * 2 + G * 3, head + (th + capH) * 2 + G * 3
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    for i, (t, cap) in enumerate(tiles[:4]):
+        x = G + (i % 2) * (tw + G)
+        y = head + (i // 2) * (th + capH + G)
+        img.paste(t, (x, y))
+        d.rectangle([x - 1, y - 1, x + tw, y + th], outline=(48, 48, 52))
+        d.text((x, y + th + 8), cap, font=font(REG, 20), fill=DIM)
+    ft = font(BLACK, 56)
+    d.text((G, 18), "ReDetail 2.0", font=ft, fill=ACCENT)
+    tagx = G + d.textlength("ReDetail 2.0", font=ft) + 26
+    fit(d, "refine to 4K on a 32GB card", REG, 30, W - tagx - G, (tagx, 38), DIM)
+    fit(d, "each tile: LEFT half Lanczos  ·  RIGHT half refine  ·  3840x2144 output, 100% pixels",
+        BOLD, 21, W - G * 2, (G, 108), FG)
+    p_ = f"{OUT}/cover_4k.png"
+    img.save(p_)
+    print(f"  cover_4k.png {W}x{H}")
+    return p_
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene")
     ap.add_argument("--no-video", action="store_true")
     ap.add_argument("--crop", default=None, help="100%% crop window, e.g. 600x450")
     ap.add_argument("--reels", action="store_true", help="build the two reels and nothing else")
+    ap.add_argument("--4k", dest="four_k", action="store_true",
+                    help="2.0 4K showcase: 100%% crop cards and 1:1 wipe videos from SHOW4K")
+    ap.add_argument("--v2", action="store_true",
+                    help="2.0 assets: Lanczos | pixel | refine crops, refine strip, cover_v2")
     ap.add_argument("--crop-reel", action="store_true",
                     help="1080p nearest-neighbour crop reel, for platforms that re-encode")
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     if a.crop:
         CROP = tuple(int(v) for v in a.crop.lower().split("x"))
+
+    if a.four_k:
+        segs = []
+        for name, src, ref, t, desc in SHOW4K:
+            print(f"{name} (4K)")
+            segs += [m for m in build_4k(name, src, ref, t, desc, not a.no_video)
+                     if m.endswith(".mp4")]
+        if segs:
+            lst = f"{OUT}/.4k_concat.txt"
+            open(lst, "w").write("".join(f"file '{os.path.abspath(x)}'\n" for x in segs))
+            sh("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c:v",
+               "libx264", "-crf", "15", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+               f"{OUT}/reel_4k_1to1.mp4")
+            os.remove(lst)
+            print(f"  reel_4k_1to1.mp4  ({len(segs)} segments)")
+        cover_4k()
+        sys.exit(0)
+
+    if a.v2:
+        for name, steps, t, desc, stem in SCENES:
+            if not a.scene or name == a.scene:
+                print(f"{name} {steps}st @{t}s (v2)")
+                build_v2(name, steps, t, desc, stem, not a.no_video)
+        print("cover_v2")
+        cover_v2()
+        sys.exit(0)
 
     if a.crop_reel:
         print("reel: 1080p nearest-neighbour crop")

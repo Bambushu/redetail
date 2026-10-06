@@ -24,7 +24,8 @@ SOFTWARE.
 
 THE MIT GRANT ABOVE COVERS THIS PROJECT'S ORIGINAL CODE ONLY:
 
-    redetail.py   build_ui_workflow.py   tools/   demos/
+    redetail.py   build_ui_workflow.py   build_refine_workflow.py
+    build_mac_workflow.py   tools/   demos/
 
 IT DOES NOT COVER THE MODEL WEIGHTS, IT DOES NOT COVER THE WORKFLOW FILES IN
 workflows/, AND IT DOES NOT COVER THE CACHED CONDITIONING TENSORS IN
@@ -38,8 +39,9 @@ as required by section 3(b) of that Agreement.
 
 THE WORKFLOW FILES ARE MODIFIED DERIVATIVES
 -------------------------------------------
-workflows/ReDetail_LTX25_upscale.json and workflows/ltx25_upscale_API.json are
-DERIVED, WITH MODIFICATIONS, from Lightricks' shipped example
+workflows/ReDetail_LTX25_upscale.json, workflows/ReDetail_LTX25_upscale_MAC.json
+and workflows/ltx25_upscale_API.json are DERIVED, WITH MODIFICATIONS, from
+Lightricks' shipped example
 
     example_workflows/2.5/LTX-2.5_V2V_ICLoRA_Single_Stage_Distilled.json
     github.com/Lightricks/ComfyUI-LTXVideo
@@ -49,10 +51,26 @@ the int8_convrot quantisation, the IC-LoRA swapped from instant-shave to the
 pixel spatial upscaler, two canvas links severed so the output dimensions are
 settable, the reference-resize default changed, a placeholder image set, and
 six documentation panels rewritten. build_ui_workflow.py performs and documents
-every one of these edits.
+every one of these edits. The _MAC variant is built from that result by
+build_mac_workflow.py, which documents its own further edits.
 
-Lightricks' unmodified example is NOT redistributed here. Fetch it from the
-repository above; build_ui_workflow.py prints the exact path if it is absent.
+workflows/ReDetail_LTX25_refine.json and workflows/ltx25_refine_API.json are
+DERIVED, WITH MODIFICATIONS, from Lightricks' shipped example
+
+    example_workflows/2.5/LTX-2.5_V2V_TiledFusion_Upscale.json
+    github.com/Lightricks/ComfyUI-LTXVideo
+
+Changes made (section 3(c) requires this notice): model filenames and their
+download links repointed to the int8_convrot quantisation, two links cut so the
+sampler's tile is pinned to 1024x576, the prompt-enhancer branches rewired so
+they are unreachable, both prompt boxes filled with the model card's example
+prompts, the output-size default changed from 4K to FullHD, node titles changed,
+and six documentation panels rewritten. build_refine_workflow.py performs and
+documents every one of these edits; ltx25_refine_API.json is that result
+resolved to ComfyUI's API format.
+
+Lightricks' unmodified examples are NOT redistributed here. Fetch them from the
+repository above; the build scripts print the exact path if one is absent.
 
 These files are distributed EXCLUSIVELY under the LTX-2 Community License
 Agreement, per section 3(b). The MIT grant above does not apply to them.
@@ -76,12 +94,23 @@ and the same use restrictions and commercial terms carry forward to you.
 
 They are quantisation-specific in origin: the int8_convrot encoder is a
 different quantisation of the same model, and its embedding of the empty string
-has NOT been verified byte-identical to these. It is expected to be numerically
-close. If you would rather not rely on that, regenerate them yourself with
+is NOT identical to these (measured: cosine similarity 0.934). In practice the
+difference is small: a 17-frame pixel render using these files sat at 48.3 dB
+PSNR from the same render through the int8 encoder. If you want exact parity
+with your own encoder, regenerate them yourself with
 
     python3 redetail.py --bootstrap-cond --encoder <your encoder>
 
 which writes to ComfyUI/output/cond_cache/ and takes precedence over these.
+
+tools/comfyui_cond_cache/redetail_refine_pos.pt and redetail_refine_neg.pt are
+the same kind of output for refine mode, whose prompt boxes are not empty: the
+encoding of the Refine-Details model card's example prompts (as carried in
+workflows/ltx25_refine_API.json) by
+
+    gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors  (type ltxv)
+
+They are governed exactly like the pair above.
 
 
 THE WEIGHTS
@@ -89,8 +118,11 @@ THE WEIGHTS
   * LTX-2.5 (Lightricks) ............... LTX-2 Community License Agreement
   * LTX-2.5 IC-LoRA Pixel Spatial
     Upscaler (Lightricks) .............. see that model repository's own terms
+  * LTX-2.5 IC-LoRA Refine Details
+    (Lightricks) ....................... LTX-2.x Community License Agreement
 
-Both Hugging Face repositories are gated and require accepting their licence.
+All three Hugging Face repositories are gated and require accepting their
+licence.
 
 
 USE RESTRICTIONS CARRY FORWARD (section 3(a))

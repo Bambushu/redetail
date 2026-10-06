@@ -10,6 +10,7 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# Lightricks' unmodified example workflow. NOT redistributed here: build_ui_workflow.py
-# derives from it and prints exactly where to fetch it. See LICENSE.
+# Lightricks' unmodified example workflows. NOT redistributed here: build_ui_workflow.py and
+# build_refine_workflow.py derive from them and print exactly where to fetch them. See LICENSE.
 workflows/_base_ui.json
+workflows/_base_refine_ui.json

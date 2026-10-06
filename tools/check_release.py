@@ -46,8 +46,10 @@ args = ap.parse_args()
 COMFY = args.comfy.rstrip("/")
 
 print("\n=== 1. Files present ===")
-for f in ["redetail.py", "build_ui_workflow.py", "README.md", "LICENSE", ".gitignore",
+for f in ["redetail.py", "build_ui_workflow.py", "build_refine_workflow.py", "README.md",
+          "CHANGELOG.md", "LICENSE", ".gitignore",
           "workflows/ReDetail_LTX25_upscale.json", "workflows/ltx25_upscale_API.json",
+          "workflows/ReDetail_LTX25_refine.json", "workflows/ltx25_refine_API.json",
           "workflows/redetail_replace_me.png"]:
     p = os.path.join(REPO, f)
     ok(f, os.path.exists(p), f"{os.path.getsize(p)/1024:.0f}KB" if os.path.exists(p) else "MISSING")
@@ -107,6 +109,50 @@ ok("cached conditioning exempts the encoder requirement",
 ok("unselected GGUF does not pass --setup", "but you did not " in src)
 ok("ffconcat paths escaped", "replace(\"'\", \"'\\\\''\")" in src)
 
+# REFINE GEOMETRY: the /32 grid, no source fit, and still the scale that was asked for.
+bad = []
+for (w, h), sc in (((640, 384), 2.0), ((768, 1376), 1.5), ((1280, 720), 1.5), ((1920, 1080), 2.0),
+                   ((1664, 928), 2.31), ((1080, 1920), 1.5), ((1984, 1120), 1.943)):
+    tw, th = r.target_for(w, h, w, h, sc, r.GRID["refine"])[:2]
+    if tw % 32 or th % 32 or abs(th / h - sc) / sc > 0.06:
+        bad.append(f"{w}x{h}@{sc} -> {tw}x{th}")
+ok("refine targets are /32 and deliver the asked scale", not bad, str(bad))
+ok("refine reads the clip as-is (no /64 source fit)",
+   '("none", w, h) if refine else fit_source(w, h)' in src)
+ok("refine renders the card's 8-frame tail pad", "rlen += 8" in src)
+# Found on ComfyUI 0.37: LoadVideo now reports its INPUT clip as an output, ahead of the render,
+# and 1.x downloaded the first video it saw. Every run "succeeded" and returned the clip it had
+# uploaded. Frame count could not catch it; only asking for the save node and checking size can.
+ok("downloads the SAVE node's file, not the first video in history",
+   "def wait(self, pid, save_node" in src and "comfy.wait(comfy.submit(pr), N_SAVE)" in src)
+ok("every chunk is checked for the target size", "Refusing to assemble a" in src)
+ok("guide strength refused in pixel mode", "--guide-strength is a refine-mode dial" in src)
+# BEHAVIOURAL. The crf path moved between ComfyUI releases (format.codec... -> codec...), so the
+# walker is exercised against both published schema shapes plus one with no crf at all.
+_new = {"required": {"format": ["COMBO", {}], "codec": ["COMFY_DYNAMICCOMBO_V3", {"options": [
+    {"key": "auto", "inputs": {}}, {"key": "h264", "inputs": {"optional": {"encoding": [
+        "COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "auto", "inputs": {}}, {"key": "re-encode",
+            "inputs": {"required": {"crf": ["FLOAT", {}]}}}]}]}}}]}]}}
+_old = {"required": {"format": ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "auto", "inputs": {
+    "required": {"codec": _new["required"]["codec"]}}}]}]}}
+import io as _io
+_real = urllib.request.urlopen
+try:
+    _got = []
+    for _schema in (_new, _old, {"required": {"format": ["COMBO", {}], "codec": ["COMBO", {}]}}):
+        urllib.request.urlopen = (lambda *a, _s=_schema, **k:
+                                  _io.BytesIO(json.dumps({"SaveVideo": {"input": _s}}).encode()))
+        _c = object.__new__(r.Comfy)
+        _c.url = "x"
+        _got.append(_c.save_options())
+finally:
+    urllib.request.urlopen = _real
+ok("SaveVideo crf found under codec (newer ComfyUI)", _got[0].get("codec.encoding.crf") == r.SAVE_CRF
+   and _got[0].get("codec") == "h264", str(_got[0]))
+ok("SaveVideo crf found under format (ComfyUI 0.37)",
+   _got[1].get("format.codec.encoding.crf") == r.SAVE_CRF, str(_got[1]))
+ok("no crf sent to a server that declares none", _got[2] == {}, str(_got[2]))
+
 print("\n=== 3b. Muxing the original audio never trims the picture ===")
 # BEHAVIOURAL, not a string match. A source's audio track is routinely a few ms shorter than its
 # picture, and `-shortest` alone then stops at the AUDIO end and silently drops the last frames —
@@ -147,24 +193,51 @@ _cmd = _cmd[:_cmd.find("```")]
 for _flag in ("--encoder", "--clip-device", "--budget", "--decode-tile", "--decode-temporal"):
     ok(f"4090 recipe keeps {_flag}", _flag in _cmd)
 
-print("\n=== 4. Every README dimension is on the /64 grid ===")
-# 2880x1632 (off-grid TARGET) and 432x768 (off-grid SOURCE) are the two counter-examples the
-# prose exists to explain. Anything else off-grid is a typo that would fail a real render.
-DELIBERATE = {"2880x1632", "432x768"}
+print("\n=== 4. Every README dimension is on the /32 grid ===")
+# /32 is the refine grid, and every pixel TARGET is re-derived on /64 in section 5. Refine takes
+# any SOURCE size, so its table lists these two off-grid sources on purpose. Anything else off /32
+# is a typo that would fail a real render.
+DELIBERATE = {"1280x720", "1920x1080"}
 bad = {f"{a}x{b}" for a, b in re.findall(r"(\d{3,4})[x×](\d{3,4})", md)
-       if int(a) % 64 or int(b) % 64}
-# SUBSET, not equality. These two are *permitted*, not *required* — asserting equality meant that
+       if int(a) % 32 or int(b) % 32}
+# SUBSET, not equality. These are *permitted*, not *required* — asserting equality meant that
 # editing a counter-example out of the prose failed the check, which is backwards.
-ok("README dims /64 (counter-examples allowed)", bad <= DELIBERATE,
+ok("README dims /32 (off-grid refine sources allowed)", bad <= DELIBERATE,
    f"unexplained off-grid: {sorted(bad - DELIBERATE)}")
 
-print("\n=== 5. README size table re-derived from the code ===")
-rows = re.findall(r"\|\s*(\d+)x(\d+)\s*\|\s*\**(\d+)x(\d+)\**[^|]*\|\s*(\d+)x(\d+)\s*\|", md)
-ok("table rows found", len(rows) >= 5, f"{len(rows)} rows")
-for sw, sh, w15, h15, w20, h20 in rows:
-    d15, d20 = r.solve_dims(int(sw), int(sh), 1.5)[:2], r.solve_dims(int(sw), int(sh), 2.0)[:2]
-    ok(f"  {sw}x{sh}", d15 == (int(w15), int(h15)) and d20 == (int(w20), int(h20)),
+print("\n=== 5. README size tables re-derived from the code ===")
+_ROW = r"\|\s*(\d+)x(\d+)\s*\|\s*\**(\d+)x(\d+)\**[^|]*\|\s*\**(\d+)x(\d+)\**[^|]*\|"
+
+
+def _table(start, end):
+    a = md.find(start)
+    return re.findall(_ROW, md[a:md.find(end, a)]) if a >= 0 else []
+
+
+# Each table is checked against ITS mode's solver. One regex over the whole README used to be
+# enough; with two tables on two grids it would check refine rows against the pixel solver.
+_ref = _table("**Refine** needs both output dimensions", "In the workflow you pick")
+_pix = _table("**Pixel** needs **/64**", "The bold pixel rows")
+ok("refine table rows found", len(_ref) >= 5, f"{len(_ref)} rows")
+for sw, sh, w15, h15, w20, h20 in _ref:
+    sw, sh = int(sw), int(sh)
+    d15 = r.target_for(sw, sh, sw, sh, 1.5, r.GRID["refine"])[:2]
+    d20 = r.target_for(sw, sh, sw, sh, 2.0, r.GRID["refine"])[:2]
+    ok(f"  refine {sw}x{sh}", d15 == (int(w15), int(h15)) and d20 == (int(w20), int(h20)),
        f"README {w15}x{h15} / {w20}x{h20}  vs derived {d15} / {d20}")
+ok("pixel table rows found", len(_pix) >= 5, f"{len(_pix)} rows")
+for sw, sh, w15, h15, w20, h20 in _pix:
+    d15, d20 = r.solve_dims(int(sw), int(sh), 1.5)[:2], r.solve_dims(int(sw), int(sh), 2.0)[:2]
+    ok(f"  pixel {sw}x{sh}", d15 == (int(w15), int(h15)) and d20 == (int(w20), int(h20)),
+       f"README {w15}x{h15} / {w20}x{h20}  vs derived {d15} / {d20}")
+
+print("\n=== 5b. No unfinished placeholders ship ===")
+# The docs are drafted before the measurements that fill them; a TODO_ marker must never reach a
+# release. Checked across every shipped text file, including the generated workflows' notes.
+_todo = [f for f in ("README.md", "CHANGELOG.md", "LICENSE", "workflows/ReDetail_LTX25_refine.json",
+                     "workflows/ReDetail_LTX25_upscale.json")
+         if "TODO_" in open(os.path.join(REPO, f), encoding="utf-8").read()]
+ok("no TODO_ markers in shipped files", not _todo, str(_todo))
 
 print("\n=== 6. Documented flags match argparse ===")
 _f = md[md.find("## Every flag"):]
@@ -205,6 +278,73 @@ nbad = sorted({f"{a}x{b}" for a, b in re.findall(r"(\d{3,4})[x×](\d{3,4})", not
                if int(a) % 64 or int(b) % 64})
 ok("note dims /64", nbad == ["2880x1632"], f"found {nbad}")
 
+# THE REFINE WORKFLOW. Generated by build_refine_workflow.py, so every fix is asserted here in
+# the shipped artefact, not just in the builder that produces it.
+rwf = json.load(open(f"{REPO}/workflows/ReDetail_LTX25_refine.json"))
+rn = {n["id"]: n for n in rwf["nodes"]}
+ok("refine: 18 top-level nodes", len(rwf["nodes"]) == 18, str(len(rwf["nodes"])))
+ok("refine: 6 subgraph definitions", len(rwf.get("definitions", {}).get("subgraphs", [])) == 6)
+ok("refine: saved viewport present", bool(rwf.get("extra", {}).get("ds")))
+_tin = {i["name"]: i for i in rn[5516]["inputs"]}
+ok("refine: tile links cut, so the sampler's own widgets are live",
+   _tin["tile_width"].get("link") is None and _tin["tile_height"].get("link") is None)
+_sn, _sv = rn[5516]["widgets_values_named"], rn[5516]["widgets_values"]
+ok("refine: tile 1024x576 in BOTH stored copies",
+   (_sn["tile_width"], _sn["tile_height"]) == (1024, 576)
+   and _sv[list(_sn).index("tile_width")] == 1024 and _sv[list(_sn).index("tile_height")] == 576)
+
+
+def _agree(nodes):
+    return [n["id"] for n in nodes if n.get("widgets_values_named") is not None
+            and list(n["widgets_values_named"].values()) != n["widgets_values"][:len(n["widgets_values_named"])]]
+
+
+_dis = _agree(rwf["nodes"]) + [x for sg in rwf["definitions"]["subgraphs"] for x in _agree(sg["nodes"])]
+ok("refine: positional and named widget copies agree everywhere", not _dis, str(_dis))
+_vals = []
+
+
+def _walk(o, key=""):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            _walk(v, k)
+    elif isinstance(o, list):
+        for v in o:
+            _walk(v, key)
+    elif isinstance(o, str) and key not in ("name", "label"):
+        _vals.append(o)
+
+
+_walk(rwf)
+ok("refine: no bf16 transformer/encoder or e2b file named anywhere",
+   not [v for v in _vals if "distilled-transformer-bf16" in v or "with-proj-ltx-2.5-bf16" in v
+        or "gemma4_e2b_it" in v])
+_urls = [m["url"] for m in rn[5004]["properties"]["models"]]
+ok("refine: Missing Models panel offers the int8 files and the refine LoRA",
+   any("transformer-comfy-int8-convrot" in u for u in _urls)
+   and any("proj-ltx-2.5-comfy-int8-convrot" in u for u in _urls)
+   and any("refine-details-1.0" in u for u in _urls) and not any("bf16.safetensors" in u
+   and ("transformer" in u or "with-proj" in u) for u in _urls), str(_urls))
+ok("refine: card prompts in both prompt boxes",
+   rn[5508]["widgets_values"][0].startswith("sharp photographic detail")
+   and rn[5509]["widgets_values"][0].startswith("blurry, soft, plastic"))
+ok("refine: output_size defaults to FullHD", rn[9002]["widgets_values_named"]["output_size"] == "FullHD")
+rnotes = " ".join((n.get("widgets_values") or [""])[0]
+                  for n in rwf["nodes"] if n.get("type") == "MarkdownNote")
+for label, cond in (("no em dashes", "\u2014" not in rnotes),
+                    ("pack date stated", "24 September 2026" in rnotes),
+                    ("comfy-kitchen pin", ">=0.2.26" in rnotes),
+                    ("anullsrc rate matches README", "r=48000" in rnotes),
+                    ("-count_frames", "-count_frames" in rnotes),
+                    ("portrait tile explained", "576x1024" in rnotes),
+                    ("kornia pin retired", "no longer needed" in rnotes),
+                    ("enhancer explained", "disconnected" in rnotes),
+                    ("python3 everywhere", "python3 redetail.py" in rnotes)):
+    ok(f"refine notes: {label}", cond)
+_rbad = sorted({f"{a}x{b}" for a, b in re.findall(r"(\d{3,4})[x×](\d{3,4})", rnotes)
+                if int(a) % 32 or int(b) % 32})
+ok("refine note dims /32", not _rbad, f"found {_rbad}")
+
 print("\n=== 8. Licence compliance ===")
 # The LTX-2 Community License is NOT permissive. Section 3 permits redistributing derivatives
 # only on conditions, and each check below maps to one of them.
@@ -220,8 +360,18 @@ ok("3(b) derivatives stated as exclusively under that Agreement", "EXCLUSIVELY u
 ok("3(c) modified files carry a notice of what changed", "Changes made" in lic)
 ok("3(a) use restrictions passed on to recipients", "USE RESTRICTIONS CARRY FORWARD" in lic)
 ok("commercial-revenue threshold stated", "10,000,000" in lic and "10,000,000" in md)
-ok("no verbatim upstream example redistributed",
-   not os.path.exists(os.path.join(REPO, "workflows", "_base_ui.json")))
+# TRACKED, not present. The build scripts need the unmodified examples beside them, so a
+# maintainer checkout legitimately has them on disk; .gitignore keeps them out of every commit.
+_bases = ["workflows/_base_ui.json", "workflows/_base_refine_ui.json"]
+if os.path.isdir(os.path.join(REPO, ".git")):
+    _tracked = subprocess.run(["git", "-C", REPO, "ls-files", *_bases], capture_output=True,
+                              text=True).stdout.split()
+else:
+    _tracked = [b for b in _bases if os.path.exists(os.path.join(REPO, b))]
+ok("no verbatim upstream example redistributed", not _tracked, str(_tracked))
+ok("3(c) the refine workflow's changes are noticed",
+   "LTX-2.5_V2V_TiledFusion_Upscale.json" in lic and "build_refine_workflow.py" in lic)
+ok("Refine-Details weights listed", "Refine Details" in lic)
 ok("no self-contradiction", "CODE AND WORKFLOW" not in lic
    and "do not reproduce any upstream" not in md.lower())
 ok("README licence section agrees", "own code only" in md)
@@ -271,6 +421,22 @@ _lic = open(os.path.join(REPO, "LICENSE")).read()
 ok("LICENSE names the .pt files as LTX-2 material", "comfyui_cond_cache" in _lic)
 ok("LICENSE states which encoder produced them", "Q5_K_M" in _lic)
 ok("LICENSE flags the int8 quantisation caveat", "int8_convrot encoder is a" in _lic)
+# Refine's prompts are not empty, so it ships its own pair, made by the int8 encoder.
+for _n in ("redetail_refine_pos", "redetail_refine_neg"):
+    _p = f"{_cc}/{_n}.pt"
+    _have = os.path.isfile(_p)
+    ok(f"{_n}.pt shipped", _have, f"{os.path.getsize(_p)} bytes" if _have else "MISSING")
+    if _have:
+        ok(f"{_n}.pt under 1MB", os.path.getsize(_p) < 1 << 20)
+ok("LICENSE names the refine tensors and their encoder",
+   "redetail_refine_pos.pt" in _lic and "comfy-int8-convrot.safetensors  (type ltxv)" in _lic)
+# ComfyUI 0.37 ships a core SaveConditioning that shadows ours. The CLI must use the unique names.
+_pk = open(f"{_cc}/__init__.py").read()
+ok("cache pack registers unique ReDetail* node names",
+   '"ReDetailSaveConditioning"' in _pk and '"ReDetailLoadConditioning"' in _pk)
+ok("CLI uses the unique names, never the shadowed core one",
+   '"class_type": "ReDetailSaveConditioning"' in src and '"class_type": "SaveConditioning"' not in src
+   and '"class_type": "ReDetailLoadConditioning"' in src)
 ok("README documents --cached-cond", "--cached-cond" in md)
 # The Mac variant shipped without the README ever naming it, so a Mac user would have
 # followed the manual GGUF instructions instead of the graph built for them.
@@ -297,6 +463,39 @@ for _wf in ("workflows/ReDetail_LTX25_upscale.json", "workflows/ReDetail_LTX25_u
 ok("builder reproduces the rewire (not just the checked-in file)",
    "Expected to rewire 2 conditioning links past the switches"
    in open(os.path.join(REPO, "build_ui_workflow.py")).read())
+# The refine graph has TWO enhancer branches: the Gemma-API switches and a prompt rewriter.
+_rapi = json.load(open(os.path.join(REPO, "workflows/ltx25_refine_API.json")))
+ok("refine API: conditioning straight from LTXVConditioning",
+   _rapi["9002:9005"]["inputs"]["positive"] == ["5014:1241", 0]
+   and _rapi["9002:9005"]["inputs"]["negative"] == ["5014:1241", 1])
+ok("refine API: prompt switch never reaches the enhancer",
+   _rapi["5014:5556"]["inputs"]["on_true"] == ["5508", 0])
+_rip = next((sg for sg in rwf["definitions"]["subgraphs"] if sg.get("name") == "Input Parameters"), {})
+_ro = {l.get("id"): l.get("origin_id") for l in _rip.get("links", [])}
+ok("refine UI: all three enhancer links rerouted",
+   _ro.get(13790) == 1241 and _ro.get(13791) == 1241 and _ro.get(4) == -10,
+   f"13790<-{_ro.get(13790)} 13791<-{_ro.get(13791)} 4<-{_ro.get(4)}")
+ok("refine builder reproduces the rewire",
+   "the enhancer blocks non-default installs"
+   in open(os.path.join(REPO, "build_refine_workflow.py")).read())
+
+print("\n=== 13. The refine API graph is the one redetail.py expects ===")
+_ri = lambda k: _rapi[k]["inputs"]
+ok("tile literal 1024x576, not linked",
+   (_ri("5516:9100")["tile_width"], _ri("5516:9100")["tile_height"]) == (1024, 576))
+ok("Refine-Details LoRA at 1.0 on the int8 transformer",
+   _ri("5004:5606")["lora_name"] == "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors"
+   and _ri("5004:5606")["strength_model"] == 1
+   and _ri("5004:5602")["unet_name"].endswith("comfy-int8-convrot.safetensors"))
+ok("guide streams 97-frame windows", _ri("9002:5012").get("use_streaming") is True)
+ok("the nodes the CLI patches all exist",
+   all(k in _rapi for k in (r.N_VIDEO, r.N_SAVE, r.N_CANVAS, r.N_GUIDE_RESIZE, r.N_GUIDE,
+                            r.N_SAMPLER, "5014:2483", "5014:2612", "5518:5538")))
+ok("placeholders, not a maintainer's files",
+   _ri("5001")["file"] == "__INPUT_VIDEO__" and _ri("4852")["filename_prefix"] == "__OUT_PREFIX__")
+ok("prompts match the UI workflow's",
+   (_ri("5508")["value"], _ri("5509")["value"]) == (rn[5508]["widgets_values"][0],
+                                                   rn[5509]["widgets_values"][0]))
 
 print("\n=== 10. Live install check ===")
 try:

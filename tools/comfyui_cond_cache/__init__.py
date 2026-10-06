@@ -101,7 +101,15 @@ class LoadConditioning:
             f"no cached conditioning '{name}' in any of: {', '.join(_search(name))}")
 
 
-NODE_CLASS_MAPPINGS = {"SaveConditioning": SaveConditioning,
+# ComfyUI 0.37 added a CORE node called SaveConditioning (different inputs, safetensors output),
+# and core wins a name clash, so `SaveConditioning` here stopped resolving to this class. The
+# ReDetail* names are the ones redetail.py uses; the bare names stay registered so 1.x graphs (the
+# Mac workflow's LoadConditioning) keep loading on installs where nothing shadows them.
+NODE_CLASS_MAPPINGS = {"ReDetailSaveConditioning": SaveConditioning,
+                       "ReDetailLoadConditioning": LoadConditioning,
+                       "SaveConditioning": SaveConditioning,
                        "LoadConditioning": LoadConditioning}
-NODE_DISPLAY_NAME_MAPPINGS = {"SaveConditioning": "Save Conditioning (cache)",
+NODE_DISPLAY_NAME_MAPPINGS = {"ReDetailSaveConditioning": "Save Conditioning (ReDetail cache)",
+                              "ReDetailLoadConditioning": "Load Conditioning (ReDetail cache)",
+                              "SaveConditioning": "Save Conditioning (cache)",
                               "LoadConditioning": "Load Conditioning (cache)"}
