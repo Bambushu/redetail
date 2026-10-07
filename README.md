@@ -2,7 +2,7 @@
 
 Video upscaling and re-detailing for ComfyUI on LTX-2.5: two drag-and-drop workflows, and a CLI
 that drives them for real clips. The default mode, **refine**, rebuilds the fine detail a soft
-clip is missing and keeps the framing, colour, motion and faces as they were. 4K fits on a 32GB
+clip is missing and keeps the framing, colour, motion and faces as they were. 4K runs on a 24GB
 card; system RAM is the limit there (see [Memory](#memory)).
 
 [![Four 100% crops from 4K output, each split Lanczos left and refine right](docs/cover_4k.jpg)](docs/cover_4k.jpg)
@@ -26,13 +26,13 @@ re-renders the whole clip and invents the fine detail as it goes: more detail, a
 | fidelity to the source | **31.8-38.9 dB, SSIM 0.92-0.98** | 24.2-31.3 dB, SSIM 0.73-0.91 |
 | flicker vs Lanczos | **1.4-2.7x** | 2.2-5.1x |
 | 97 frames, 768x1376 to 1216x2112, 32GB card | 526 s, 28.2 GB VRAM | **206 s**, 31.9 GB VRAM |
-| 4K | **one pass: 97 frames to 2176x3904, 14 min, 28.4 GB VRAM** | VRAM grows with frames x pixels |
+| 4K | **one pass: 97 frames to 2176x3904, 14 min, 28.4 GB VRAM** (24GB card: 21 min, 23.3 GB) | VRAM grows with frames x pixels |
 | workflow | `ReDetail_LTX25_refine.json` | `ReDetail_LTX25_upscale.json` |
 
 The first three rows are ranges over seven MiniMax H3 clips (640x384, 10 s, upscaled 2x).
 Fidelity compares the result, scaled back down, with the source. Refine was closer to the source
-and flickered less on all seven. The time and VRAM rows are single runs, on a 32GB RTX PRO 4500
-and an RTX 5090.
+and flickered less on all seven. The time and VRAM rows are single runs, on a 32GB RTX PRO 4500,
+an RTX 5090 and a 24GB RTX 4090.
 
 ![The same face at 2x: Lanczos, pixel and refine](docs/face_2x.jpg)
 
@@ -115,8 +115,9 @@ base repository included, or the downloads fail with HTTP 403.
 | `ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors` | `models/loras/` | 1.3 GB | refine |
 | `ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors` | `models/loras/` | 0.3 GB | pixel |
 
-`int8_convrot` is not Blackwell-only: users run it on a 3090, a 4090 and a 1070. If it won't
-load, check `comfy-kitchen` before your card. Version 0.2.10, which several ComfyUI images ship,
+`int8_convrot` is not Blackwell-only: refine runs on it on an RTX 4090, and users run it on a
+3090 and a 1070. If it won't load, check `comfy-kitchen` before your card. Version 0.2.10, which
+several ComfyUI images ship,
 fails on every convrot checkpoint with an error that reads like unsupported weights.
 
 **Less VRAM: GGUF.** Install [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) and put the
@@ -133,7 +134,9 @@ python3 redetail.py clip.mp4 --scale 1.5 --model pixel \
 
 On an RTX 4090 that sampled 8 steps in 70 s at 21.8 GB of 24.5 GB peak. Refine takes the same
 flags: on an RTX 5090, Q4_K_M refine with `--cached-cond` rendered 17 frames 640x384 to 1280x768
-at 48.0 dB PSNR (SSIM 0.991) against the int8 render. Refine on a 24GB card hasn't been measured.
+at 48.0 dB PSNR (SSIM 0.991) against the int8 render. On a 24GB card refine doesn't need it: on an
+RTX 4090 the 4K pass under [Memory](#memory) took 36 min on Q4_K_M against 21 min on int8, and
+Q4_K_M saved system RAM (42 GB against 50), not VRAM.
 
 ## Sizes
 
@@ -174,7 +177,8 @@ pixel-mode source on the grid, which can crop it by a few percent or resample it
 
 **Refine.** VRAM follows the tile, and the sampler streams long clips in 97-frame windows, so one
 render can cover a whole shot. On an RTX 5090, 97 frames to 2176x3904 took one 14-minute pass at
-**28.4 GB** of VRAM.
+**28.4 GB** of VRAM. A 24GB RTX 4090 ran the same pass in 21 minutes at **23.3 GB**: ComfyUI loads
+the int8 model dynamically and streams what doesn't fit from system RAM.
 
 System RAM is what runs out. ComfyUI keeps the weights staged in RAM (about 22 GB) and holds both
 the resized clip and the decoded result as float frames, about **33 MB per output
@@ -316,9 +320,9 @@ unaffected.
 
 ## Tested on
 
-ComfyUI 0.37.2 with ComfyUI-LTXVideo from 1 October 2026, kornia 0.8.3 and comfy-kitchen 0.2.37,
-on an RTX 5090, October 2026. The Apple Silicon and RTX 4090 numbers are from ComfyUI 0.32.0,
-August 2026.
+ComfyUI 0.37.2 with kornia 0.8.3 and comfy-kitchen 0.2.37, October 2026: on an RTX 5090 with
+ComfyUI-LTXVideo from 1 October, and on an RTX 4090 (refine) with the pack from 24 September. The
+Apple Silicon numbers and the RTX 4090 pixel-mode numbers are from ComfyUI 0.32.0, August 2026.
 
 ## Licence
 
