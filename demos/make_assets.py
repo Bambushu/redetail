@@ -462,7 +462,10 @@ def crop_wipe_segment(left_v, right_v, ow, oh, box, mag, start, dur, label, dst)
        f"box=1:boxcolor=black@0.55:boxborderw=14,"
        f"drawtext=fontfile={BOLD}:text='LANCZOS':x=w-tw-30:y=30:fontsize=44:fontcolor=white:"
        f"box=1:boxcolor=black@0.55:boxborderw=14,"
-       f"drawtext=fontfile={BLACK}:text='{label}':x=30:y=h-th-30:fontsize=34:fontcolor=0xFF8A4C:"
+       # expansion=none: drawtext otherwise reads the % in "100% PIXELS" as a format sequence,
+       # logs "Stray %" and draws no caption at all, with exit code 0.
+       f"drawtext=fontfile={BLACK}:expansion=none:text='{label}':x=30:y=h-th-30:fontsize=34:"
+       f"fontcolor=0xFF8A4C:"
        f"box=1:boxcolor=black@0.55:boxborderw=14[v]",
        "-map", "[v]", "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", "-r", "24",
        "-an", dst)
@@ -888,12 +891,34 @@ def cover_v2():
 # Lanczos -> refine wipe, which is what survives being watched on a 1080p screen.
 # ------------------------------------------------------------------------------------------------
 DEMO4K = os.path.expanduser("~/h3-demos/redetail-v2/demo4k")
-SHOW4K = [  # (name, source, refine 4K, still time, caption)
+RUTH4K = os.path.expanduser("~/h3-demos/ltx25-refine-ab/ruth/4k")
+RUTHSRC = os.path.expanduser("~/remotion-studio/public/video/rutc6_23269936")
+ONE_PASS = "one pass, redetail.py --cached-cond"
+# (name, source, refine 4K, still time, caption, how it was rendered, wipe start/duration).
+# Forest and band stay first: cover_4k() tiles the first four crops. The RUTH shots ran through the
+# pod upscaler on the same refine graph (tile pinned 1024x576, LoRA 1.0, guide 1.0), split into
+# ~2s chunks by its RAM budget. Each chunk re-synthesises the fine detail, so at 100% pixels the
+# join is the biggest frame-to-frame change in the window (measured: the top 1% on three of six
+# windows). Their wipes therefore stay inside the first chunk.
+SHOW4K = [
     ("forest", f"{DEMO4K}/forest_river_97f.mp4", f"{DEMO4K}/forest_river_refine_3840x2144.mp4",
-     2.0, "Forest river, backlit mist"),
+     2.0, "Forest river, backlit mist", ONE_PASS, (0.0, 4.0)),
     ("band", f"{DEMO4K}/band_wheatfield_97f.mp4", f"{DEMO4K}/band_wheatfield_refine_3840x2144.mp4",
-     2.0, "Band in a wheat field"),
+     2.0, "Band in a wheat field", ONE_PASS, (0.0, 4.0)),
+    ("gallop", f"{RUTHSRC}/rr_S11.mp4", f"{RUTH4K}/rr_S11/rr_S11_1.943x_refine.mp4",
+     2.0, "Gallop under a storm sky", "3 chunks", (0.0, 2.2)),      # chunk 0 = frames 0-52
+    ("chapel", f"{RUTHSRC}/story5_S13.mp4", f"{RUTH4K}/story5_S13/story5_S13_2.31x_refine.mp4",
+     2.0, "Rain, mud and a chapel", "4 chunks", (0.0, 1.99)),       # chunk 0 = frames 0-47
+    ("rain", f"{RUTHSRC}/story6_S14.mp4", f"{RUTH4K}/story6_S14/story6_S14_1.943x_refine.mp4",
+     2.0, "Close-up in the rain", "3 chunks", (0.0, 2.2)),          # chunk 0 = frames 0-52
+    ("table", os.path.expanduser("~/h3-demos/ltx25-refine-ab/inputs/people_f264.mp4"),
+     os.path.expanduser("~/h3-demos/redetail-v2/people4k/people97_refine_cc_2176x3904.mp4"),
+     2.0, "Two friends at a table", ONE_PASS, (0.0, 4.0)),
 ]
+# Reel order: the horse opens. chapel_2 (a motion-blurred sleeve) and rain_1 (bare ground) show
+# little at 100% and stay out of the reel; their cards are still built.
+REEL4K = ["gallop_2", "forest_1", "chapel_1", "band_2", "table_1", "rain_2", "forest_2",
+          "gallop_1", "table_2", "band_1"]
 
 
 def rois(src_img, ow, oh, cw, ch, n=2):
@@ -911,7 +936,7 @@ def rois(src_img, ow, oh, cw, ch, n=2):
     return out
 
 
-def build_4k(name, src, ref, t, desc, do_video):
+def build_4k(name, src, ref, t, desc, how, wipe, do_video):
     if not (os.path.exists(src) and os.path.exists(ref)):
         print(f"  skip {name}: missing input")
         return []
@@ -923,8 +948,12 @@ def build_4k(name, src, ref, t, desc, do_video):
     grab(src, t, s_png)
     grab(ref, t, r_png)
     lanczos(s_png, ow, oh, l_png)
-    rows = [("SOURCE", f"generated clip, {sw}x{sh_}, 97f @24fps")] + REFINE_SETTINGS + [
-        ("OUTPUT", f"{ow}x{oh}  ({ow / sw:.2f}x), one pass, redetail.py --cached-cond")]
+    nf = sh_out("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "stream=nb_frames", "-of", "csv=p=0", src).strip()
+    # A portrait canvas runs portrait tiles (the CLI turns them), so the card must say so.
+    tiles = [(k, v.replace("1024x576", "576x1024") if oh > ow else v) for k, v in REFINE_SETTINGS]
+    rows = [("SOURCE", f"generated clip, {sw}x{sh_}, {nf}f @24fps")] + tiles + [
+        ("OUTPUT", f"{ow}x{oh}  ({ow / sw:.2f}x), {how}")]
     made = []
     for i, (x, y) in enumerate(rois(Image.open(s_png), ow, oh, 960, 640), 1):
         box = (x, y, x + 960, y + 640)
@@ -942,7 +971,7 @@ def build_4k(name, src, ref, t, desc, do_video):
             cx, cy = x + 480, y + 320
             bx, by = max(0, min(cx - 960, ow - 1920)), max(0, min(cy - 540, oh - 1080))
             v = f"{OUT}/wipe4k_{name}_{i}.mp4"
-            crop_wipe_segment(src, ref, ow, oh, (bx, by, 1920, 1080), 1, 0.0, 4.0,
+            crop_wipe_segment(src, ref, ow, oh, (bx, by, 1920, 1080), 1, *wipe,
                               # No colon: drawtext reads one as an option separator even inside
                               # quotes, so "1:1" breaks the whole filtergraph.
                               f"{desc.upper()}  ·  4K  ·  100% PIXELS", v)
@@ -1014,10 +1043,11 @@ if __name__ == "__main__":
 
     if a.four_k:
         segs = []
-        for name, src, ref, t, desc in SHOW4K:
+        for name, src, ref, t, desc, how, wipe in SHOW4K:
             print(f"{name} (4K)")
-            segs += [m for m in build_4k(name, src, ref, t, desc, not a.no_video)
+            segs += [m for m in build_4k(name, src, ref, t, desc, how, wipe, not a.no_video)
                      if m.endswith(".mp4")]
+        segs = [f"{OUT}/wipe4k_{n}.mp4" for n in REEL4K if f"{OUT}/wipe4k_{n}.mp4" in segs]
         if segs:
             lst = f"{OUT}/.4k_concat.txt"
             open(lst, "w").write("".join(f"file '{os.path.abspath(x)}'\n" for x in segs))
