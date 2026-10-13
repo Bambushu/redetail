@@ -210,7 +210,7 @@ def scene_cuts(path, threshold=0.3):
 def segments(cuts, end, max_sec, fps):
     """Contiguous chunks, cut boundaries first, EVERY LENGTH 8n+1 FRAMES.
 
-    Two things this has to get right, both learned the hard way on the SuperTrips trailer:
+    Two things this has to get right, both learned the hard way on a feature-length trailer:
 
     1. Chunks must TILE the source contiguously in frames. Anything else desyncs the picture
        against the original audio, and a desynced file still plays perfectly and reports a clean
